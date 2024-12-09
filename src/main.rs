@@ -14,8 +14,8 @@ use tokio::time::sleep;
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 const HASH_MAX: u64 = 0xFFFFF;
 
-#[derive(clap::ValueEnum, PartialEq, Debug, Clone)]
-enum CompressionAlgo {
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum CompressionFormat {
     Brotli,
     Gzip,
 }
@@ -23,32 +23,34 @@ enum CompressionAlgo {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Algorithm to use to compress the dataset files
+    /// Specifies the compression format to use when storing the files
     #[arg(long, value_enum)]
-    compression: Option<CompressionAlgo>,
+    compression: Option<CompressionFormat>,
 
-    /// Create output directory if it doesn't exist
+    /// Automatically creates the output directory if it does not already exist
     #[arg(long, default_value_t = false)]
     create_directory: bool,
 
-    /// Number of parallel requests
+    /// Sets the maximum number of requests to run concurrently
     #[arg(long, default_value_t = 64)]
     max_parallel_requests: usize,
 
-    /// Number of retries before giving up
+    /// Sets the number of retry attempts
     #[arg(long, default_value_t = 10)]
     max_retries: usize,
 
-    /// Where to download the files
+    /// Specifies the directory where downloaded files will be stored
     #[arg(long, default_value = ".")]
     output_directory: String,
 
-    /// Show progress bar
+    /// Enables the display of a progress bar during operations
     #[arg(long, default_value_t = false)]
     progress_bar: bool,
 
-    /// Set the User agent
-    #[arg(long, default_value = "hibp-downloader")]
+    /// Sets the User-Agent string for HTTP requests
+    #[arg(long, default_value_t = format!("hibp-downloader/{}.{}",
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        env!("CARGO_PKG_VERSION_MINOR")))]
     user_agent: String,
 }
 
@@ -56,11 +58,25 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
+    // Always use compression when downloading the files.
+    let accept_encoding = match args.compression {
+        Some(CompressionFormat::Gzip) => "gzip",
+        Some(CompressionFormat::Brotli) | None => "br",
+    };
+
+    let mut client_builder = reqwest::Client::builder().user_agent(args.user_agent);
+    // If compression is enabled, disable auto-decompression.
+    if args.compression.is_some() {
+        client_builder = client_builder.no_gzip().no_brotli();
+    }
+    let client = client_builder.build().expect("client builder succeeded");
+
     let output_directory = PathBuf::from(args.output_directory);
     if !output_directory.exists() && args.create_directory {
         _ = fs::create_dir(&output_directory);
     }
 
+    // Create hidden progress bar.
     let progress_bar = ProgressBar::with_draw_target(Some(HASH_MAX), ProgressDrawTarget::hidden())
         .with_style(
             ProgressStyle::with_template(
@@ -69,24 +85,10 @@ async fn main() {
             .unwrap()
             .progress_chars("#>-"),
         );
+    // If progress bar is enabled, unhide it.
     if args.progress_bar {
         progress_bar.set_draw_target(ProgressDrawTarget::stderr());
     }
-
-    let mut client_builder = reqwest::Client::builder().user_agent(format!(
-        "{}/{}",
-        args.user_agent,
-        env!("CARGO_PKG_VERSION")
-    ));
-    if args.compression.is_some() {
-        client_builder = client_builder.no_gzip().no_brotli();
-    }
-    let client = client_builder.build().expect("client builder succeeded");
-
-    let accept_encoding = match args.compression {
-        Some(CompressionAlgo::Gzip) => "gzip",
-        None | Some(CompressionAlgo::Brotli) => "br",
-    };
 
     let sem = Arc::new(Semaphore::new(args.max_parallel_requests));
 
@@ -126,6 +128,7 @@ async fn main() {
                         break;
                     }
                     _ => {
+                        // Exponential backoff on error.
                         sleep(Duration::from_secs(u64::pow(2, retry as u32))).await;
                     }
                 };
