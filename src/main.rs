@@ -92,11 +92,11 @@ async fn main() {
 
     let sem = Arc::new(Semaphore::new(args.max_parallel_requests));
 
-    for suffix in 0..=HASH_MAX {
+    for prefix in 0..=HASH_MAX {
         let permit = Arc::clone(&sem).acquire_owned().await;
 
         let client = client.clone();
-        let suffix_hex = format!("{:05X}", suffix);
+        let prefix_hex = format!("{:05X}", prefix);
         let output_path = output_directory.clone();
         let progress_bar = progress_bar.clone();
 
@@ -104,7 +104,7 @@ async fn main() {
             let _permit = permit;
             for retry in 0..=args.max_retries {
                 match client
-                    .get(HIBP_BASE_URL.to_string() + &suffix_hex)
+                    .get(HIBP_BASE_URL.to_string() + &prefix_hex)
                     .header(ACCEPT_ENCODING, accept_encoding)
                     .send()
                     .await
@@ -120,7 +120,7 @@ async fn main() {
                             Some(_) => ".bin",
                             _ => "",
                         };
-                        let mut file = File::create(output_path.join(suffix_hex + extension))
+                        let mut file = File::create(output_path.join(prefix_hex + extension))
                             .expect("file creation succeeded");
                         _ = file
                             .write_all(&response.bytes().await.expect("full response in bytes"));
