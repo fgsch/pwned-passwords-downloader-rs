@@ -110,16 +110,7 @@ async fn main() {
                     .await
                 {
                     Ok(response) => {
-                        let extension = match response
-                            .headers()
-                            .get(CONTENT_ENCODING)
-                            .map(|s| s.to_str().unwrap_or_default())
-                        {
-                            Some("br") => ".br",
-                            Some("gzip") => ".gz",
-                            Some(_) => ".bin",
-                            _ => "",
-                        };
+                        let extension = get_extension(&response);
                         let mut file = File::create(output_path.join(prefix_hex + extension))
                             .expect("file creation succeeded");
                         _ = file
@@ -136,4 +127,17 @@ async fn main() {
         });
     }
     progress_bar.finish();
+}
+
+fn get_extension(response: &reqwest::Response) -> &str {
+    match response
+        .headers()
+        .get(CONTENT_ENCODING)
+        .map(|s| s.to_str().unwrap_or_default())
+    {
+        Some("br") => ".br",
+        Some("gzip") => ".gz",
+        Some(_) => ".bin",
+        _ => "",
+    }
 }
