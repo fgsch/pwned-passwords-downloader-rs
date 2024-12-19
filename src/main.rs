@@ -105,7 +105,7 @@ async fn main() {
 
         set.spawn(async move {
             let _permit = permit;
-            'outer: for retry in 0..=args.max_retries {
+            'outer: for retry in 0..args.max_retries {
                 match client
                     .get(HIBP_BASE_URL.to_string() + &prefix_hex)
                     .header(ACCEPT_ENCODING, accept_encoding)
