@@ -105,7 +105,7 @@ async fn main() {
 
         set.spawn(async move {
             let _permit = permit;
-            for retry in 0..=args.max_retries {
+            'outer: for retry in 0..=args.max_retries {
                 match client
                     .get(HIBP_BASE_URL.to_string() + &prefix_hex)
                     .header(ACCEPT_ENCODING, accept_encoding)
@@ -114,18 +114,23 @@ async fn main() {
                 {
                     Ok(response) => {
                         let extension = get_extension(&response);
-                        let mut file = File::create(output_path.join(prefix_hex + extension))
-                            .expect("file creation succeeded");
-                        _ = file
-                            .write_all(&response.bytes().await.expect("full response in bytes"));
+                        let mut file = match File::create(output_path.join(prefix_hex + extension))
+                        {
+                            Ok(file) => file,
+                            Err(_err) => break,
+                        };
+                        match response.bytes().await {
+                            Ok(body) => _ = file.write_all(&body),
+                            Err(_err) => break,
+                        }
                         progress_bar.inc(1);
-                        break;
+                        break 'outer;
                     }
-                    _ => {
-                        // Exponential backoff on error.
-                        sleep(Duration::from_secs(u64::pow(2, retry as u32))).await;
-                    }
-                };
+                    Err(_err) => {}
+                }
+
+                // Exponential backoff on error.
+                sleep(Duration::from_secs(u64::pow(2, retry as u32))).await;
             }
         });
     }
