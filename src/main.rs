@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
@@ -92,6 +93,8 @@ async fn main() {
 
     let sem = Arc::new(Semaphore::new(args.max_parallel_requests));
 
+    let mut set = JoinSet::new();
+
     for prefix in 0..=HASH_MAX {
         let permit = Arc::clone(&sem).acquire_owned().await;
 
@@ -100,7 +103,7 @@ async fn main() {
         let output_path = output_directory.clone();
         let progress_bar = progress_bar.clone();
 
-        tokio::spawn(async move {
+        set.spawn(async move {
             let _permit = permit;
             for retry in 0..=args.max_retries {
                 match client
@@ -126,6 +129,9 @@ async fn main() {
             }
         });
     }
+
+    set.join_all().await;
+
     progress_bar.finish();
 }
 
