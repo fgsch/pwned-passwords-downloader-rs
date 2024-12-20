@@ -96,11 +96,11 @@ async fn main() {
 
     let mut set = JoinSet::new();
 
-    for prefix in 0..=HASH_MAX {
+    for hash_prefix in 0..=HASH_MAX {
         let permit = Arc::clone(&sem).acquire_owned().await;
 
         let client = client.clone();
-        let prefix_hex = format!("{:05X}", prefix);
+        let hash_prefix_str = format!("{:05X}", hash_prefix);
         let output_path = output_directory.clone();
         let progress_bar = progress_bar.clone();
 
@@ -108,18 +108,18 @@ async fn main() {
             let _permit = permit;
             'outer: for retry in 0..args.max_retries {
                 match client
-                    .get(HIBP_BASE_URL.to_string() + &prefix_hex)
+                    .get(HIBP_BASE_URL.to_string() + &hash_prefix_str)
                     .header(ACCEPT_ENCODING, accept_encoding)
                     .send()
                     .await
                 {
                     Ok(response) => {
-                        if response.status() != StatusCode::OK {
+                        let status_code = response.status();
+                        if status_code != StatusCode::OK {
                             break;
                         }
-                        let extension = get_extension(&response);
-                        let mut file = match File::create(output_path.join(prefix_hex + extension))
-                        {
+                        let filename = output_path.join(hash_prefix_str + get_extension(&response));
+                        let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
                         };
