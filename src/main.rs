@@ -3,6 +3,7 @@
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
+use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -113,6 +114,9 @@ async fn main() {
                     .await
                 {
                     Ok(response) => {
+                        if response.status() != StatusCode::OK {
+                            break;
+                        }
                         let extension = get_extension(&response);
                         let mut file = match File::create(output_path.join(prefix_hex + extension))
                         {
