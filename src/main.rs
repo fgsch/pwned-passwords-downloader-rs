@@ -117,8 +117,8 @@ async fn main() {
                         if status_code != StatusCode::OK {
                             break;
                         }
-                        let filename =
-                            output_directory.join(hash_prefix_str + get_extension(&response));
+                        let mut filename = output_directory.join(hash_prefix_str);
+                        filename.set_extension(get_extension(&response));
                         let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
@@ -150,9 +150,9 @@ fn get_extension(response: &reqwest::Response) -> &str {
         .get(CONTENT_ENCODING)
         .map(|s| s.to_str().unwrap_or_default())
     {
-        Some("br") => ".br",
-        Some("gzip") => ".gz",
-        Some(_) => ".bin",
+        Some("br") => "br",
+        Some("gzip") => "gz",
+        Some(_) => "bin",
         _ => "",
     }
 }
