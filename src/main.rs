@@ -43,7 +43,7 @@ struct Args {
 
     /// Specifies the directory where downloaded files will be stored
     #[arg(long, default_value = ".")]
-    output_directory: String,
+    output_directory: PathBuf,
 
     /// Enables the display of a progress bar during operations
     #[arg(long, default_value_t = false)]
@@ -73,9 +73,8 @@ async fn main() {
     }
     let client = client_builder.build().expect("client builder succeeded");
 
-    let output_directory = PathBuf::from(args.output_directory);
-    if !output_directory.exists() && args.create_directory {
-        _ = fs::create_dir(&output_directory);
+    if !args.output_directory.exists() && args.create_directory {
+        _ = fs::create_dir(&args.output_directory);
     }
 
     // Create hidden progress bar.
@@ -101,7 +100,7 @@ async fn main() {
 
         let client = client.clone();
         let hash_prefix_str = format!("{:05X}", hash_prefix);
-        let output_path = output_directory.clone();
+        let output_directory = args.output_directory.clone();
         let progress_bar = progress_bar.clone();
 
         set.spawn(async move {
@@ -118,7 +117,8 @@ async fn main() {
                         if status_code != StatusCode::OK {
                             break;
                         }
-                        let filename = output_path.join(hash_prefix_str + get_extension(&response));
+                        let filename =
+                            output_directory.join(hash_prefix_str + get_extension(&response));
                         let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
