@@ -38,7 +38,7 @@ struct Args {
     max_parallel_requests: usize,
 
     /// Sets the number of retry attempts
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 5)]
     max_retries: usize,
 
     /// Specifies the directory where downloaded files will be stored
