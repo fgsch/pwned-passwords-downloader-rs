@@ -118,7 +118,7 @@ async fn main() {
                             break;
                         }
                         let mut filename = output_directory.join(hash_prefix_str);
-                        filename.set_extension(get_extension(&response));
+                        filename.set_extension(guess_extension(&response));
                         let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
@@ -144,7 +144,7 @@ async fn main() {
     progress_bar.finish();
 }
 
-fn get_extension(response: &reqwest::Response) -> &str {
+fn guess_extension(response: &reqwest::Response) -> &str {
     match response
         .headers()
         .get(CONTENT_ENCODING)
