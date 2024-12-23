@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use reqwest::header::{ACCEPT_ENCODING, CONTENT_ENCODING};
+use reqwest::header;
 use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::Write;
@@ -108,7 +108,7 @@ async fn main() {
             'outer: for retry in 0..args.max_retries {
                 match client
                     .get(HIBP_BASE_URL.to_string() + &hash_prefix_str)
-                    .header(ACCEPT_ENCODING, accept_encoding)
+                    .header(header::ACCEPT_ENCODING, accept_encoding)
                     .send()
                     .await
                 {
@@ -147,7 +147,7 @@ async fn main() {
 fn guess_extension(response: &reqwest::Response) -> &str {
     match response
         .headers()
-        .get(CONTENT_ENCODING)
+        .get(header::CONTENT_ENCODING)
         .map(|s| s.to_str().unwrap_or_default())
     {
         Some("br") => "br",
