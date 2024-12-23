@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use reqwest::header;
+use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::Write;
@@ -66,7 +66,14 @@ async fn main() {
         Some(CompressionFormat::Brotli) | None => "br",
     };
 
-    let mut client_builder = reqwest::Client::builder().user_agent(args.user_agent);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static(accept_encoding),
+    );
+    let mut client_builder = reqwest::Client::builder()
+        .default_headers(headers)
+        .user_agent(args.user_agent);
     // If compression is enabled, disable auto-decompression.
     if args.compression.is_some() {
         client_builder = client_builder.no_gzip().no_brotli();
@@ -108,7 +115,6 @@ async fn main() {
             'outer: for retry in 0..args.max_retries {
                 match client
                     .get(HIBP_BASE_URL.to_string() + &hash_prefix_str)
-                    .header(header::ACCEPT_ENCODING, accept_encoding)
                     .send()
                     .await
                 {
