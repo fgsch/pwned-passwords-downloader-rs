@@ -117,16 +117,19 @@ async fn main() {
                         if status_code != StatusCode::OK {
                             break;
                         }
+
                         let mut filename = output_directory.join(hash_prefix_str);
                         filename.set_extension(guess_extension(&response));
                         let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
                         };
+
                         match response.bytes().await {
                             Ok(body) => _ = file.write_all(&body),
                             Err(_err) => break,
                         }
+
                         progress_bar.inc(1);
                         break 'outer;
                     }
