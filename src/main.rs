@@ -141,7 +141,7 @@ async fn main() {
 
     set.join_all().await;
 
-    progress_bar.finish();
+    progress_bar.abandon();
 }
 
 fn guess_extension(response: &reqwest::Response) -> &str {
