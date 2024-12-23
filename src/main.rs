@@ -96,7 +96,7 @@ async fn main() {
     let mut set = JoinSet::new();
 
     for hash_prefix in 0..=HASH_MAX {
-        let permit = Arc::clone(&sem).acquire_owned().await;
+        let permit = sem.clone().acquire_owned().await;
 
         let client = client.clone();
         let hash_prefix_str = format!("{:05X}", hash_prefix);
