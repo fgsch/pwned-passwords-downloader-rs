@@ -7,13 +7,15 @@ use reqwest::StatusCode;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use toml::Table;
 
+const ETAGS_FILENAME: &str = ".etags.toml";
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 const HASH_MAX: u64 = 0xFFFFF;
 
@@ -50,6 +52,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     progress_bar: bool,
 
+    /// Resume previous transfer
+    #[arg(long, default_value_t = false)]
+    resume: bool,
+
     /// Sets the User-Agent string for HTTP requests
     #[arg(long, default_value_t = format!("hibp-downloader/{}.{}",
         env!("CARGO_PKG_VERSION_MAJOR"),
@@ -75,6 +81,7 @@ async fn main() {
     let mut client_builder = reqwest::Client::builder()
         .default_headers(headers)
         .user_agent(args.user_agent);
+
     // If compression is enabled, disable auto-decompression.
     if args.compression.is_some() {
         client_builder = client_builder.no_gzip().no_brotli();
@@ -99,6 +106,16 @@ async fn main() {
         progress_bar.set_draw_target(ProgressDrawTarget::stderr());
     }
 
+    // Handle entity tags.
+    let etags = Arc::new(RwLock::new(
+        toml::from_str::<Table>(
+            &std::fs::read_to_string(args.output_directory.join(ETAGS_FILENAME))
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default(),
+    ));
+
+    // Handle ctrl-c
     let token = CancellationToken::new();
     let token_cloned = token.clone();
 
@@ -119,35 +136,68 @@ async fn main() {
         let permit = sem.clone().acquire_owned().await;
 
         let client = client.clone();
+        let etags_cloned = etags.clone();
         let hash_prefix_str = format!("{:05X}", hash_prefix);
         let output_directory = args.output_directory.clone();
         let progress_bar = progress_bar.clone();
 
+        // Get entity tag if resume is enabled.
+        let etag = if args.resume {
+            etags_cloned
+                .read()
+                .unwrap()
+                .get(&hash_prefix_str)
+                .map(|s| s.as_str().unwrap_or_default().to_string())
+                .unwrap_or_default()
+        } else {
+            "".to_string()
+        };
+
         set.spawn(async move {
             let _permit = permit;
+
             'inner: for retry in 0..args.max_retries {
-                match client
-                    .get(HIBP_BASE_URL.to_string() + &hash_prefix_str)
-                    .send()
-                    .await
-                {
+                let mut request = client.get(HIBP_BASE_URL.to_string() + &hash_prefix_str);
+                if !etag.is_empty() {
+                    request = request.header(header::IF_NONE_MATCH, &etag);
+                }
+
+                match request.send().await {
                     Ok(response) => {
                         let status_code = response.status();
-                        if status_code != StatusCode::OK {
-                            break;
+                        match status_code {
+                            StatusCode::OK => {}
+                            StatusCode::NOT_MODIFIED if args.resume => {
+                                progress_bar.inc(1);
+                                break 'inner;
+                            }
+                            _ => break,
                         }
 
-                        let mut filename = output_directory.join(hash_prefix_str);
+                        let mut filename = output_directory.join(&hash_prefix_str);
                         filename.set_extension(guess_extension(&response));
                         let mut file = match File::create(filename) {
                             Ok(file) => file,
                             Err(_err) => break,
                         };
 
+                        // Get entity tag from the request.
+                        let etag = response
+                            .headers()
+                            .get(header::ETAG)
+                            .map(|s| s.to_str().unwrap_or_default().to_string())
+                            .unwrap_or_default();
+
                         match response.bytes().await {
                             Ok(body) => _ = file.write_all(&body),
                             Err(_err) => break,
                         }
+
+                        // Add entity tag to the map.
+                        etags_cloned
+                            .write()
+                            .unwrap()
+                            .insert(hash_prefix_str, etag.into());
 
                         progress_bar.inc(1);
                         break 'inner;
@@ -164,6 +214,11 @@ async fn main() {
     set.join_all().await;
 
     progress_bar.abandon();
+
+    _ = std::fs::write(
+        args.output_directory.join(ETAGS_FILENAME),
+        etags.read().unwrap().to_string().as_bytes(),
+    );
 }
 
 fn guess_extension(response: &reqwest::Response) -> &str {
