@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 const HASH_MAX: u64 = 0xFFFFF;
@@ -98,11 +99,23 @@ async fn main() {
         progress_bar.set_draw_target(ProgressDrawTarget::stderr());
     }
 
+    let token = CancellationToken::new();
+    let token_cloned = token.clone();
+
+    tokio::task::spawn(async move {
+        _ = tokio::signal::ctrl_c().await;
+        token.cancel();
+    });
+
     let sem = Arc::new(Semaphore::new(args.max_parallel_requests));
 
     let mut set = JoinSet::new();
 
     for hash_prefix in 0..=HASH_MAX {
+        if token_cloned.is_cancelled() {
+            break;
+        }
+
         let permit = sem.clone().acquire_owned().await;
 
         let client = client.clone();
