@@ -125,7 +125,7 @@ async fn main() {
 
         set.spawn(async move {
             let _permit = permit;
-            'outer: for retry in 0..args.max_retries {
+            'inner: for retry in 0..args.max_retries {
                 match client
                     .get(HIBP_BASE_URL.to_string() + &hash_prefix_str)
                     .send()
@@ -150,7 +150,7 @@ async fn main() {
                         }
 
                         progress_bar.inc(1);
-                        break 'outer;
+                        break 'inner;
                     }
                     Err(_err) => {}
                 }
