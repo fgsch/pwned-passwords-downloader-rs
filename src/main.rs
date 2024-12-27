@@ -44,15 +44,15 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     max_retries: usize,
 
-    /// Specifies the directory where downloaded files will be stored
+    /// Specifies the directory where downloaded hashes will be stored
     #[arg(long, default_value = ".")]
     output_directory: PathBuf,
 
-    /// Enables the display of a progress bar during operations
+    /// Enables the display of a progress bar during download
     #[arg(long, default_value_t = false)]
     progress_bar: bool,
 
-    /// Resume previous transfer
+    /// Resumes previous download
     #[arg(long, default_value_t = false)]
     resume: bool,
 
