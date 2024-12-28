@@ -194,10 +194,12 @@ async fn main() {
                         }
 
                         // Add entity tag to the map.
-                        etags_cloned
-                            .write()
-                            .unwrap()
-                            .insert(hash_prefix_str, etag.into());
+                        if !etag.is_empty() {
+                            etags_cloned
+                                .write()
+                                .unwrap()
+                                .insert(hash_prefix_str, etag.into());
+                        }
 
                         progress_bar.inc(1);
                         break 'inner;
