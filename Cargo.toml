@@ -1,13 +1,34 @@
 [package]
 name = "pwned-passwords-downloader-rs"
-description = "A tool to download all Pwned Passwords hashes"
+authors = ["Federico G. Schwindt <fgsch@lodoss.net>"]
+description = "A tool to download password hashes from Have I Been Pwned"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/fgsch/pwned-passwords-downloader-rs"
+homepage = "https://github.com/fgsch/pwned-passwords-downloader-rs"
+readme = "README.md"
+keywords = ["security", "passwords", "hibp", "downloader"]
+categories = ["command-line-utilities", "web-programming::http-client"]
 
 [dependencies]
-clap = { version = "4.5.23", features = ["derive"] }
-indicatif = "0.17.9"
-reqwest = { version = "0.12.9", features = ["brotli", "gzip"] }
-tokio = { version = "1.42.0", features = ["macros", "rt-multi-thread", "signal"] }
-tokio-util = "0.7.13"
-toml = "0.8.19"
+anyhow = "1.0.99"
+clap = { version = "4.5.47", features = ["derive"] }
+futures = "0.3.31"
+indicatif = "0.18.0"
+reqwest = { version = "0.12.23", features = ["brotli", "gzip", "stream"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = [
+  "macros",
+  "rt-multi-thread",
+  "signal",
+] }
+tokio-util = "0.7.16"
+
+[dev-dependencies]
+http = "1.3.1"
+mockito = "1.7.0"
+tempfile = "3.21.0"
+tokio-test = "0.4.4"
