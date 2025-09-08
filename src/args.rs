@@ -134,3 +134,53 @@ pub fn parse_args() -> Result<(Args, Client), ArgsError> {
 
     Ok((args, client_builder.build()?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn test_parse_greater_than_zero_valid() {
+        assert_eq!(parse_greater_than_zero("1").unwrap(), 1);
+        assert_eq!(parse_greater_than_zero("5").unwrap(), 5);
+        assert_eq!(parse_greater_than_zero("100").unwrap(), 100);
+        assert_eq!(parse_greater_than_zero("999999").unwrap(), 999999);
+    }
+
+    #[test]
+    fn test_parse_greater_than_zero_invalid_zero() {
+        let result = parse_greater_than_zero("0");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("Value must be greater than 0"));
+    }
+
+    #[test]
+    fn test_parse_greater_than_zero_invalid_non_numeric() {
+        let result = parse_greater_than_zero("abc");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("`abc` isn't a valid integer"));
+    }
+
+    #[test]
+    fn test_parse_greater_than_zero_invalid_negative() {
+        let result = parse_greater_than_zero("-1");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("`-1` isn't a valid integer"));
+    }
+
+    #[test]
+    fn test_parse_greater_than_zero_invalid_empty() {
+        let result = parse_greater_than_zero("");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("`` isn't a valid integer"));
+    }
+}
