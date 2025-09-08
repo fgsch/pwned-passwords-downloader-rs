@@ -26,7 +26,7 @@ use reqwest::{
 };
 use std::{error::Error as _, path::PathBuf, time::Duration};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt, time::sleep};
+use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
 
 use crate::args::Args;
