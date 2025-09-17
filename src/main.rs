@@ -42,7 +42,7 @@ const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
 const HASH_MAX: u64 = 0xFFFFF;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (args, client) = parse_args()?;
 
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
