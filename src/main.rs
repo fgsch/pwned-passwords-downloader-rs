@@ -30,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
 use tracing_subscriber::{
-    fmt::writer::MakeWriterExt, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+    fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
 use args::parse_args;
