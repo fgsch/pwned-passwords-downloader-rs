@@ -23,10 +23,15 @@ mod download;
 mod etag;
 
 use futures::StreamExt as _;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::ProgressStyle;
 use std::sync::Arc;
 use tokio::{fs, sync::Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing::Level;
+use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
+use tracing_subscriber::{
+    fmt::writer::MakeWriterExt, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+};
 
 use args::parse_args;
 use download::download_hash;
@@ -40,24 +45,27 @@ const HASH_MAX: u64 = 0xFFFFF;
 async fn main() -> anyhow::Result<()> {
     let (args, client) = parse_args()?;
 
-    tracing_subscriber::fmt().with_target(false).init();
-
-    // Create progress bar.
-    let progress_bar = ProgressBar::with_draw_target(
-        Some(HASH_MAX + 1),
-        if args.quiet {
-            ProgressDrawTarget::hidden()
-        } else {
-            ProgressDrawTarget::stderr()
-        },
-    )
-    .with_style(
+    let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {pos:>7}/{len:7} ({percent:>3}%) ETA: {eta}",
         )
         .unwrap()
         .progress_chars("#>-"),
     );
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(
+                    indicatif_layer
+                        .get_stderr_writer()
+                        .with_max_level(Level::INFO),
+                )
+                .with_target(false),
+        )
+        .with(indicatif_layer)
+        .init();
+    let span = tracing::info_span!("span");
+    span.pb_set_length(HASH_MAX + 1);
 
     // Create output directory.
     fs::create_dir_all(&args.output_directory).await?;
@@ -76,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    if !args.quiet {
+        span.pb_start();
+    }
+
     futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
         .map(|hash| {
@@ -93,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 let result = download_hash(&hash, client, etag.as_deref(), &args).await;
                 (hash, result)
             };
-            progress_bar.inc(1);
+            span.pb_inc(1);
             result
         })
         .buffer_unordered(args.max_concurrent_requests)
@@ -118,8 +130,6 @@ async fn main() -> anyhow::Result<()> {
             }
         })
         .await;
-
-    progress_bar.finish_and_clear();
 
     // Save ETag cache
     let final_cache = etag_cache.lock().await;
