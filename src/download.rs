@@ -20,10 +20,7 @@
 
 use futures::{TryFutureExt as _, TryStreamExt as _};
 use indicatif::ProgressBar;
-use reqwest::{
-    StatusCode,
-    header::{self},
-};
+use reqwest::{StatusCode, header};
 use std::{error::Error as _, path::PathBuf, time::Duration};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};

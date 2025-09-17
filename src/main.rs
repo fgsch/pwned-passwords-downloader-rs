@@ -22,7 +22,7 @@ mod args;
 mod download;
 mod etag;
 
-use futures::StreamExt;
+use futures::StreamExt as _;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::sync::Arc;
 use tokio::{fs, sync::Mutex};
