@@ -80,19 +80,19 @@ async fn main() -> anyhow::Result<()> {
             let client = client.clone();
             let etag_cache = etag_cache.clone();
             let hash = format!("{:05X}", hash);
-            let progress_bar = progress_bar.clone();
             let args = args.clone();
 
-            async move {
+            let result = async move {
                 let etag = if args.resume {
                     etag_cache.lock().await.etags.get(&hash).cloned()
                 } else {
                     None
                 };
-                let result =
-                    download_hash(&hash, client, progress_bar, etag.as_deref(), &args).await;
+                let result = download_hash(&hash, client, etag.as_deref(), &args).await;
                 (hash, result)
-            }
+            };
+            progress_bar.inc(1);
+            result
         })
         .buffer_unordered(args.max_concurrent_requests)
         .for_each(|(hash, result)| {

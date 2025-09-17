@@ -19,7 +19,6 @@
 // SOFTWARE.
 
 use futures::{TryFutureExt as _, TryStreamExt as _};
-use indicatif::ProgressBar;
 use reqwest::{StatusCode, header};
 use std::{error::Error as _, path::PathBuf, time::Duration};
 use thiserror::Error;
@@ -120,17 +119,15 @@ async fn write_hash_to_file(
 pub async fn download_hash(
     hash: &str,
     client: reqwest::Client,
-    progress_bar: ProgressBar,
     etag: Option<&str>,
     args: &Args,
 ) -> Result<Option<String>, DownloadError> {
-    download_hash_with_url(hash, client, progress_bar, etag, args, HIBP_BASE_URL).await
+    download_hash_with_url(hash, client, etag, args, HIBP_BASE_URL).await
 }
 
 async fn download_hash_with_url(
     hash: &str,
     client: reqwest::Client,
-    progress_bar: ProgressBar,
     etag: Option<&str>,
     args: &Args,
     base_url: &str,
@@ -161,7 +158,6 @@ async fn download_hash_with_url(
 
                         match write_hash_to_file(response, &final_path).await {
                             Ok(()) => {
-                                progress_bar.inc(1);
                                 return Ok(etag);
                             }
                             Err(InternalDownloadError::Fatal(err)) => {
@@ -175,7 +171,6 @@ async fn download_hash_with_url(
                         }
                     }
                     StatusCode::NOT_MODIFIED if args.resume => {
-                        progress_bar.inc(1);
                         return Ok(None);
                     }
                     status_code if status_code.is_client_error() => {
@@ -221,7 +216,6 @@ async fn download_hash_with_url(
 mod tests {
     use super::*;
     use crate::args::{Args, CompressionFormat};
-    use indicatif::{ProgressBar, ProgressDrawTarget};
     use mockito::Server;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -237,10 +231,6 @@ mod tests {
             quiet: true,
             user_agent: "test-agent/1.0".to_string(),
         }
-    }
-
-    fn create_progress_bar() -> ProgressBar {
-        ProgressBar::with_draw_target(Some(1), ProgressDrawTarget::hidden())
     }
 
     #[tokio::test]
@@ -260,13 +250,11 @@ mod tests {
 
         let client = reqwest::Client::builder().build().unwrap();
 
-        let progress_bar = create_progress_bar();
         let base_url = server.url();
 
         let result = download_hash_with_url(
             "AAAAA",
             client,
-            progress_bar,
             None,
             &args,
             &format!("{}/range/", base_url),
@@ -304,13 +292,11 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let progress_bar = create_progress_bar();
         let base_url = server.url();
 
         let result = download_hash_with_url(
             "BBBBB",
             client,
-            progress_bar,
             Some("\"existing-etag\""),
             &args,
             &format!("{}/range/", base_url),
@@ -337,13 +323,11 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let progress_bar = create_progress_bar();
         let base_url = server.url();
 
         let result = download_hash_with_url(
             "CCCCC",
             client,
-            progress_bar,
             None,
             &args,
             &format!("{}/range/", base_url),
@@ -377,13 +361,11 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let progress_bar = create_progress_bar();
         let base_url = server.url();
 
         let result = download_hash_with_url(
             "DDDDD",
             client,
-            progress_bar,
             None,
             &args,
             &format!("{}/range/", base_url),
@@ -425,13 +407,11 @@ mod tests {
             .await;
 
         let client = reqwest::Client::new();
-        let progress_bar = create_progress_bar();
         let base_url = server.url();
 
         let result = download_hash_with_url(
             "EEEEE",
             client,
-            progress_bar,
             None,
             &args,
             &format!("{}/range/", base_url),
