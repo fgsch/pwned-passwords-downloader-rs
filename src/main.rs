@@ -40,6 +40,8 @@ const HASH_MAX: u64 = 0xFFFFF;
 async fn main() -> anyhow::Result<()> {
     let (args, client) = parse_args()?;
 
+    tracing_subscriber::fmt().with_target(false).init();
+
     // Create progress bar.
     let progress_bar = ProgressBar::with_draw_target(
         Some(HASH_MAX + 1),
@@ -100,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             async move {
                 match result {
                     Err(err) => {
-                        eprintln!("{err}");
+                        tracing::error!("{err}");
                         // Remove etag on error to force re-download next time
                         let mut cache = etag_cache.lock().await;
                         cache.etags.remove(&hash);
@@ -122,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
     // Save ETag cache
     let final_cache = etag_cache.lock().await;
     if let Err(err) = final_cache.save().await {
-        eprintln!("{err}");
+        tracing::error!("{err}");
     }
 
     Ok(())
