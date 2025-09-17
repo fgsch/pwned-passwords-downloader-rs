@@ -35,8 +35,9 @@ const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    #[error("File operation on {path} failed: {source}")]
+    #[error("{operation} operation on {path} failed: {source}")]
     FileOperation {
+        operation: &'static str,
         path: String,
         #[source]
         source: std::io::Error,
@@ -82,6 +83,7 @@ async fn write_hash_to_file(
 
     let mut file = fs::File::create(&part_path).await.map_err(|source| {
         InternalDownloadError::Fatal(DownloadError::FileOperation {
+            operation: "create",
             path: part_path.display().to_string(),
             source,
         })
@@ -97,6 +99,7 @@ async fn write_hash_to_file(
                 .or_else(|source| async {
                     _ = fs::remove_file(&part_path).await;
                     Err(InternalDownloadError::Fatal(DownloadError::FileOperation {
+                        operation: "rename",
                         path: part_path.display().to_string(),
                         source,
                     }))
@@ -108,6 +111,7 @@ async fn write_hash_to_file(
             _ = fs::remove_file(&part_path).await;
             Err(InternalDownloadError::Retriable(
                 DownloadError::FileOperation {
+                    operation: "read/write",
                     path: final_path.display().to_string(),
                     source: err,
                 },
