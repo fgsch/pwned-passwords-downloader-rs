@@ -157,7 +157,7 @@ async fn download_hash_with_url(
                             .map(String::from);
 
                         match write_hash_to_file(response, &final_path).await {
-                            Ok(()) => {
+                            Ok(_) => {
                                 return Ok(etag);
                             }
                             Err(InternalDownloadError::Fatal(err)) => {
