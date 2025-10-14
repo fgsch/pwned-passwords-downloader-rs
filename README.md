@@ -1,5 +1,8 @@
 # pwned-passwords-downloader-rs
 
+[![Build Status](https://github.com/fgsch/pwned-passwords-downloader-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fgsch/pwned-passwords-downloader-rs/actions/workflows/ci.yml)
+[![Crate](https://img.shields.io/crates/v/pwned_passwords_downloader_rs.svg)](https://crates.io/crates/pwned_passwords_downloader_rs)
+
 A fast, async Rust tool to download password hashes from the [Have
 I Been Pwned](https://haveibeenpwned.com/) Pwned Passwords API.  
 This tool downloads all available password hash ranges (00000-FFFFF)
