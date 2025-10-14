@@ -1,2 +1,10 @@
 target/
+
 Cargo.lock
+
+# Common output directory names
+out/
+output/
+
+# Other
+CLAUDE.md

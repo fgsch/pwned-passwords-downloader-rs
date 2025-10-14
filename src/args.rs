@@ -68,12 +68,16 @@ pub struct Args {
     pub max_concurrent_requests: usize,
 
     /// Number of retry attempts for failed requests
-    #[arg(long, default_value_t = 5, value_parser = parse_greater_than_zero)]
+    #[arg(long, default_value_t = 10, value_parser = parse_greater_than_zero)]
     pub max_retries: usize,
 
     /// Resume previous download session
     #[arg(long, num_args=0..=1, default_value_t = true)]
     pub resume: bool,
+
+    /// Sync with existing ETag cache file (only download changed ranges)
+    #[arg(long)]
+    pub sync: Option<PathBuf>,
 
     /// Directory for storing downloaded hashes
     #[arg(long, short, default_value = ".")]
@@ -82,6 +86,10 @@ pub struct Args {
     /// Disable progress bar output
     #[arg(long, short, default_value_t = false)]
     pub quiet: bool,
+
+    /// Download all ranges as a single file
+    #[arg(long, short, default_value_t = false)]
+    pub combine: bool,
 
     /// User-Agent string for HTTP requests
     #[arg(long, short, default_value_t = concat!("hibp-downloader/",
