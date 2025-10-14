@@ -49,6 +49,8 @@ const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
 // Maximum hash value for HIBP API. This covers all possible SHA-1 hash prefixes (5 hex digits).
 const HASH_MAX: u64 = 0xFFFFF;
 
+pub const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (args, client) = parse_args()?;
@@ -199,24 +201,29 @@ pub async fn download_all_hashes<W: HashWriter + ?Sized + 'static>(
                 };
 
                 // Download the range
-                let result =
-                    match download_hash(&hash_prefix, &client, existing_etag.as_deref(), &args)
-                        .await
-                    {
-                        Ok(DownloadResult::Success { etag, data }) => {
-                            // New data received, write using the writer strategy
-                            // Writer handles ETag cache updates and error cleanup internally
-                            writer.write_range(sequence, &hash_prefix, data, etag).await
-                        }
-                        Ok(DownloadResult::NotModified) => {
-                            // 304 Not Modified - file hasn't changed, nothing to do
-                            tracing::debug!("Hash range {} was not modified", hash_prefix);
-                            Ok(())
-                        }
-                        Err(e) => Err(anyhow::anyhow!(
-                            "Failed to download range {hash_prefix}: {e}"
-                        )),
-                    };
+                let result = match download_hash(
+                    &hash_prefix,
+                    &client,
+                    existing_etag.as_deref(),
+                    &args,
+                    HIBP_BASE_URL,
+                )
+                .await
+                {
+                    Ok(DownloadResult::Success { etag, data }) => {
+                        // New data received, write using the writer strategy
+                        // Writer handles ETag cache updates and error cleanup internally
+                        writer.write_range(sequence, &hash_prefix, data, etag).await
+                    }
+                    Ok(DownloadResult::NotModified) => {
+                        // 304 Not Modified - file hasn't changed, nothing to do
+                        tracing::debug!("Hash range {} was not modified", hash_prefix);
+                        Ok(())
+                    }
+                    Err(e) => Err(anyhow::anyhow!(
+                        "Failed to download range {hash_prefix}: {e}"
+                    )),
+                };
 
                 span.pb_inc(1);
                 result

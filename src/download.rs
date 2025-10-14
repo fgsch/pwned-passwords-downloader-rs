@@ -26,8 +26,6 @@ use tokio_util::bytes::Bytes;
 
 use crate::args::Args;
 
-pub const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
-
 #[derive(Error, Debug)]
 pub enum DownloadError {
     #[allow(dead_code)]
@@ -156,9 +154,10 @@ pub async fn download_hash(
     client: &reqwest::Client,
     etag: Option<&str>,
     args: &Args,
+    base_url: &str,
 ) -> Result<DownloadResult, DownloadError> {
     for retry in 1..=args.max_retries {
-        match download_hash_once(hash, client, etag, args, HIBP_BASE_URL).await {
+        match download_hash_once(hash, client, etag, args, base_url).await {
             Ok(result) => return Ok(result),
             Err(InternalDownloadError::Fatal(err)) => return Err(err),
             Err(InternalDownloadError::Retriable(err)) => {
@@ -196,36 +195,6 @@ mod tests {
         }
     }
 
-    /// Test helper that allows specifying a custom base URL for mocking
-    async fn download_hash_with_base_url(
-        hash: &str,
-        client: &reqwest::Client,
-        etag: Option<&str>,
-        args: &Args,
-        base_url: &str,
-    ) -> Result<DownloadResult, DownloadError> {
-        for retry in 1..=args.max_retries {
-            match download_hash_once(hash, client, etag, args, base_url).await {
-                Ok(result) => return Ok(result),
-                Err(InternalDownloadError::Fatal(err)) => return Err(err),
-                Err(InternalDownloadError::Retriable(mut err)) => {
-                    if retry == args.max_retries {
-                        // Update retry count in error before returning
-                        match &mut err {
-                            DownloadError::Http { retries, .. } => *retries = args.max_retries,
-                            DownloadError::Network { retries, .. } => *retries = args.max_retries,
-                            _ => {}
-                        }
-                        return Err(err);
-                    }
-                    // Exponential backoff before retry
-                    sleep(Duration::from_secs(u64::pow(2, (retry - 1) as u32))).await;
-                }
-            }
-        }
-        unreachable!()
-    }
-
     #[tokio::test]
     async fn test_download_hash_success() {
         let mut server = Server::new_async().await;
@@ -244,14 +213,8 @@ mod tests {
         let client = reqwest::Client::builder().build().unwrap();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
-            "AAAAA",
-            &client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("AAAAA", &client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -283,14 +246,8 @@ mod tests {
         let client = reqwest::Client::builder().build().unwrap();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
-            "00000",
-            &client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("00000", &client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -321,7 +278,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
+        let result = download_hash(
             "BBBBB",
             &client,
             Some("\"existing-etag\""),
@@ -351,14 +308,8 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
-            "CCCCC",
-            &client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("CCCCC", &client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -389,14 +340,8 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
-            "DDDDD",
-            &client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("DDDDD", &client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -425,7 +370,7 @@ mod tests {
         let client = reqwest::Client::new();
 
         // Override with a test helper that uses an invalid base URL
-        let result = download_hash_with_base_url(
+        let result = download_hash(
             "FFFFF",
             &client,
             None,
@@ -458,7 +403,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
+        let result = download_hash(
             "SSSSS",
             &client,
             Some("\"sync-etag\""),
@@ -495,7 +440,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_base_url(
+        let result = download_hash(
             "TTTTT",
             &client,
             Some("\"old-etag\""),
