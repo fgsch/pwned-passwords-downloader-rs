@@ -119,15 +119,6 @@ pub async fn download_hash(
     client: reqwest::Client,
     etag: Option<&str>,
     args: &Args,
-) -> Result<Option<String>, DownloadError> {
-    download_hash_with_url(hash, client, etag, args, crate::HIBP_BASE_URL).await
-}
-
-async fn download_hash_with_url(
-    hash: &str,
-    client: reqwest::Client,
-    etag: Option<&str>,
-    args: &Args,
     base_url: &str,
 ) -> Result<Option<String>, DownloadError> {
     let ext = args.compression.as_str();
@@ -250,7 +241,7 @@ mod tests {
 
         let base_url = server.url();
 
-        let result = download_hash_with_url(
+        let result = download_hash(
             "AAAAA",
             client,
             None,
@@ -292,7 +283,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_url(
+        let result = download_hash(
             "BBBBB",
             client,
             Some("\"existing-etag\""),
@@ -323,7 +314,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_url(
+        let result = download_hash(
             "CCCCC",
             client,
             None,
@@ -361,7 +352,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_url(
+        let result = download_hash(
             "DDDDD",
             client,
             None,
@@ -407,7 +398,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash_with_url(
+        let result = download_hash(
             "EEEEE",
             client,
             None,

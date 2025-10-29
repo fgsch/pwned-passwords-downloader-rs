@@ -104,7 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     None
                 };
-                let result = download_hash(&hash, client, etag.as_deref(), &args).await;
+                let result =
+                    download_hash(&hash, client, etag.as_deref(), &args, HIBP_BASE_URL).await;
                 (hash, result)
             };
             span.pb_inc(1);
