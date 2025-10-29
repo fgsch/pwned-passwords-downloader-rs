@@ -33,8 +33,8 @@ use tracing_subscriber::{
     fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
-use args::parse_args;
-use download::download_hash;
+use args::{Args, parse_args};
+use download::{DownloadError, download_hash};
 use etag::ETagCache;
 
 const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
@@ -42,6 +42,22 @@ const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 // Maximum hash value for HIBP API. This covers all possible SHA-1 hash prefixes (5 hex digits).
 const HASH_MAX: u64 = 0xFFFFF;
+
+async fn process_single_hash(
+    hash: String,
+    client: reqwest::Client,
+    args: Args,
+    etag_cache: Arc<Mutex<ETagCache>>,
+    base_url: &str,
+) -> (String, Result<Option<String>, DownloadError>) {
+    let etag = if args.resume {
+        etag_cache.lock().await.etags.get(&hash).cloned()
+    } else {
+        None
+    };
+    let result = download_hash(&hash, client, etag.as_deref(), &args, base_url).await;
+    (hash, result)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -98,16 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hash = format!("{:05X}", hash);
             let args = args.clone();
 
-            let result = async move {
-                let etag = if args.resume {
-                    etag_cache.lock().await.etags.get(&hash).cloned()
-                } else {
-                    None
-                };
-                let result =
-                    download_hash(&hash, client, etag.as_deref(), &args, HIBP_BASE_URL).await;
-                (hash, result)
-            };
+            let result = process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL);
             span.pb_inc(1);
             result
         })
