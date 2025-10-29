@@ -212,6 +212,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
 
+        let client = reqwest::Client::new();
+
         let mock_data = "test data";
         let mock = server
             .mock("GET", "/range/AAAAA")
@@ -220,13 +222,9 @@ mod tests {
             .with_body(mock_data)
             .create_async()
             .await;
+        let base_url = format!("{}/range/", server.url());
 
-        let client = reqwest::Client::builder().build().unwrap();
-
-        let base_url = server.url();
-
-        let result =
-            download_hash("AAAAA", client, None, &args, &format!("{base_url}/range/")).await;
+        let result = download_hash("AAAAA", client, None, &args, &base_url).await;
 
         mock.assert_async().await;
 
@@ -251,24 +249,18 @@ mod tests {
         let file_path = temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
 
+        let client = reqwest::Client::new();
+
         let mock = server
             .mock("GET", "/range/BBBBB")
             .match_header("if-none-match", "\"existing-etag\"")
             .with_status(304)
             .create_async()
             .await;
+        let base_url = format!("{}/range/", server.url());
 
-        let client = reqwest::Client::new();
-        let base_url = server.url();
-
-        let result = download_hash(
-            "BBBBB",
-            client,
-            Some("\"existing-etag\""),
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("BBBBB", client, Some("\"existing-etag\""), &args, &base_url).await;
 
         mock.assert_async().await;
 
@@ -283,17 +275,16 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
 
+        let client = reqwest::Client::new();
+
         let mock = server
             .mock("GET", "/range/CCCCC")
             .with_status(404)
             .create_async()
             .await;
+        let base_url = format!("{}/range/", server.url());
 
-        let client = reqwest::Client::new();
-        let base_url = server.url();
-
-        let result =
-            download_hash("CCCCC", client, None, &args, &format!("{base_url}/range/")).await;
+        let result = download_hash("CCCCC", client, None, &args, &base_url).await;
 
         mock.assert_async().await;
 
@@ -314,18 +305,17 @@ mod tests {
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.max_retries = 5;
 
+        let client = reqwest::Client::new();
+
         let mock = server
             .mock("GET", "/range/DDDDD")
             .with_status(500)
             .expect(5)
             .create_async()
             .await;
+        let base_url = format!("{}/range/", server.url());
 
-        let client = reqwest::Client::new();
-        let base_url = server.url();
-
-        let result =
-            download_hash("DDDDD", client, None, &args, &format!("{base_url}/range/")).await;
+        let result = download_hash("DDDDD", client, None, &args, &base_url).await;
 
         mock.assert_async().await;
 
@@ -352,6 +342,8 @@ mod tests {
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.compression = CompressionFormat::Gzip;
 
+        let client = reqwest::Client::new();
+
         let mock_data = "test compressed data";
         let mock = server
             .mock("GET", "/range/EEEEE")
@@ -360,12 +352,9 @@ mod tests {
             .with_body(mock_data)
             .create_async()
             .await;
+        let base_url = format!("{}/range/", server.url());
 
-        let client = reqwest::Client::new();
-        let base_url = server.url();
-
-        let result =
-            download_hash("EEEEE", client, None, &args, &format!("{base_url}/range/")).await;
+        let result = download_hash("EEEEE", client, None, &args, &base_url).await;
 
         mock.assert_async().await;
 
