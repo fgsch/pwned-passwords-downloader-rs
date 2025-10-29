@@ -13,6 +13,7 @@ and multiple compression formats.
 
 - **Fast concurrent downloads**: Configurable number of concurrent requests
 - **Resume support**: Automatically resumes interrupted downloads using ETag caching
+- **Cache comparison**: Optionally skip ranges that match a previous ETag snapshot
 - **Compression support**: Save storage space with Brotli, Gzip, or no compression
 - **Progress tracking**: Visual progress bar with ETA
 - **Retry mechanism**: Configurable retry attempts for failed requests
@@ -49,6 +50,9 @@ pwned-passwords-downloader-rs --max-concurrent-requests 100
 # Quiet mode (no progress bar)
 pwned-passwords-downloader-rs --quiet
 
+# Skip ranges unchanged since the previous run
+pwned-passwords-downloader-rs --compare-cache /path/to/old/.etag_cache.json
+
 # Disable resume functionality
 pwned-passwords-downloader-rs --resume false
 ```
@@ -65,6 +69,8 @@ Options:
           Number of retry attempts for failed requests [default: 5]
       --resume [<RESUME>]
           Resume previous download session [default: true] [possible values: true, false]
+      --compare-cache <FILENAME>
+          Path to a previous ETag cache used to skip unchanged hashes
   -o, --output-directory <OUTPUT_DIRECTORY>
           Directory for storing downloaded hashes [default: .]
   -q, --quiet
