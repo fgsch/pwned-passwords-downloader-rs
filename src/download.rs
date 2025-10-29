@@ -183,10 +183,7 @@ pub async fn download_hash(
                 if retry == args.max_retries - 1 {
                     return Err(DownloadError::Network {
                         hash: hash.to_string(),
-                        error: err
-                            .source()
-                            .map(|e| e.to_string())
-                            .unwrap_or_else(|| err.to_string()),
+                        error: err.source().map_or(err.to_string(), |e| e.to_string()),
                         retries: args.max_retries,
                     });
                 }

@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(parse_greater_than_zero("1").unwrap(), 1);
         assert_eq!(parse_greater_than_zero("5").unwrap(), 5);
         assert_eq!(parse_greater_than_zero("100").unwrap(), 100);
-        assert_eq!(parse_greater_than_zero("999999").unwrap(), 999999);
+        assert_eq!(parse_greater_than_zero("999999").unwrap(), 999_999);
     }
 
     #[test]

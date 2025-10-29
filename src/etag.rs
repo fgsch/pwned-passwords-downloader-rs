@@ -63,7 +63,7 @@ impl ETagCache {
         };
         Ok(Self {
             etags,
-            path: path.to_path_buf(),
+            path: path.clone(),
         })
     }
 
