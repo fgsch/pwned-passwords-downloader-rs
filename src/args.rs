@@ -136,6 +136,19 @@ pub fn parse_args() -> Result<(Args, Client), ArgsError> {
 }
 
 #[cfg(test)]
+pub fn create_test_args(output_dir: PathBuf) -> Args {
+    Args {
+        compression: CompressionFormat::None,
+        max_concurrent_requests: 1,
+        max_retries: 3,
+        resume: false,
+        output_directory: output_dir,
+        quiet: true,
+        user_agent: "test-agent/1.0".to_string(),
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use clap::error::ErrorKind;

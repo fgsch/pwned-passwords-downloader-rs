@@ -201,23 +201,10 @@ pub async fn download_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{Args, CompressionFormat};
+    use crate::args::{CompressionFormat, create_test_args};
     use mockito::Server;
-    use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::fs;
-
-    fn create_test_args(output_dir: PathBuf) -> Args {
-        Args {
-            compression: CompressionFormat::None,
-            max_concurrent_requests: 1,
-            max_retries: 3,
-            resume: false,
-            output_directory: output_dir,
-            quiet: true,
-            user_agent: "test-agent/1.0".to_string(),
-        }
-    }
 
     #[tokio::test]
     async fn test_download_hash_success() {
