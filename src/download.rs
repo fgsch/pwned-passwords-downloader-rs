@@ -27,8 +27,6 @@ use tokio_util::io::StreamReader;
 
 use crate::args::Args;
 
-const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
-
 #[derive(Error, Debug)]
 pub enum DownloadError {
     #[error("{operation} operation on {path} failed: {source}")]
@@ -122,7 +120,7 @@ pub async fn download_hash(
     etag: Option<&str>,
     args: &Args,
 ) -> Result<Option<String>, DownloadError> {
-    download_hash_with_url(hash, client, etag, args, HIBP_BASE_URL).await
+    download_hash_with_url(hash, client, etag, args, crate::HIBP_BASE_URL).await
 }
 
 async fn download_hash_with_url(

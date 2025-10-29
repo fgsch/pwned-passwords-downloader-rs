@@ -38,6 +38,8 @@ use download::download_hash;
 use etag::ETagCache;
 
 const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
+// HIBP API base URL.
+const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 // Maximum hash value for HIBP API. This covers all possible SHA-1 hash prefixes (5 hex digits).
 const HASH_MAX: u64 = 0xFFFFF;
 
