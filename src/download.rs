@@ -246,7 +246,7 @@ mod tests {
             client,
             None,
             &args,
-            &format!("{}/range/", base_url),
+            &format!("{base_url}/range/"),
         )
         .await;
 
@@ -288,7 +288,7 @@ mod tests {
             client,
             Some("\"existing-etag\""),
             &args,
-            &format!("{}/range/", base_url),
+            &format!("{base_url}/range/"),
         )
         .await;
 
@@ -319,7 +319,7 @@ mod tests {
             client,
             None,
             &args,
-            &format!("{}/range/", base_url),
+            &format!("{base_url}/range/"),
         )
         .await;
 
@@ -357,7 +357,7 @@ mod tests {
             client,
             None,
             &args,
-            &format!("{}/range/", base_url),
+            &format!("{base_url}/range/"),
         )
         .await;
 
@@ -403,7 +403,7 @@ mod tests {
             client,
             None,
             &args,
-            &format!("{}/range/", base_url),
+            &format!("{base_url}/range/"),
         )
         .await;
 

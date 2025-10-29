@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|hash| {
             let client = client.clone();
             let etag_cache = etag_cache.clone();
-            let hash = format!("{:05X}", hash);
+            let hash = format!("{hash:05X}");
             let args = args.clone();
 
             let result = process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL);
