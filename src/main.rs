@@ -164,211 +164,195 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::Server;
+    use mockito::{Server, ServerGuard};
     use std::collections::HashMap;
     use tempfile::TempDir;
     use tokio::fs;
 
     use crate::args::create_test_args;
 
-    #[tokio::test]
-    async fn test_process_single_hash_skips_with_matching_compare_cache() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let args = create_test_args(temp_dir.path().to_path_buf());
-        let hash = "AAAAA".to_string();
+    struct CompareCacheSetup {
+        server: ServerGuard,
+        temp_dir: TempDir,
+        args: Args,
+        hash: String,
+        etag_cache: Arc<Mutex<ETagCache>>,
+        previous_cache: Option<Arc<ETagCache>>,
+    }
 
+    async fn build_compare_cache_setup(
+        hash: &str,
+        resume: bool,
+        current_etag: &str,
+        previous_etag: Option<&str>,
+        existing_content: Option<&str>,
+    ) -> CompareCacheSetup {
+        let server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.resume = resume;
+        let hash = hash.to_string();
+
+        let current_path = temp_dir.path().join("current.json");
         let mut current_cache = ETagCache {
             etags: HashMap::new(),
-            path: temp_dir.path().join("current.json"),
+            path: current_path,
         };
         current_cache
             .etags
-            .insert(hash.clone(), "\"etag\"".to_string());
+            .insert(hash.clone(), current_etag.to_string());
 
-        let mut previous_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("previous.json"),
-        };
-        previous_cache
-            .etags
-            .insert(hash.clone(), "\"etag\"".to_string());
+        let previous_path = temp_dir.path().join("previous.json");
+        let previous_cache = previous_etag.map(|etag| {
+            let mut cache = ETagCache {
+                etags: HashMap::new(),
+                path: previous_path.clone(),
+            };
+            cache.etags.insert(hash.clone(), etag.to_string());
+            Arc::new(cache)
+        });
 
-        let etag_cache = Arc::new(Mutex::new(current_cache));
-        let previous_etag_cache = Some(Arc::new(previous_cache));
+        if let Some(content) = existing_content {
+            let file_path = temp_dir.path().join(&hash);
+            fs::write(&file_path, content).await.unwrap();
+        }
 
+        CompareCacheSetup {
+            server,
+            temp_dir,
+            args,
+            hash,
+            etag_cache: Arc::new(Mutex::new(current_cache)),
+            previous_cache,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_single_hash_skips_with_matching_compare_cache() {
+        let mut setup =
+            build_compare_cache_setup("AAAAA", false, "\"etag\"", Some("\"etag\""), None).await;
+
+        let base_url = format!("{}/range/", setup.server.url());
         let client = reqwest::Client::new();
 
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/AAAAA")
             .expect_at_most(0)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
 
         let (returned_hash, result) = process_single_hash(
-            hash.clone(),
+            setup.hash.clone(),
             client,
-            args,
-            etag_cache,
-            previous_etag_cache,
+            setup.args.clone(),
+            setup.etag_cache.clone(),
+            setup.previous_cache.clone(),
             &base_url,
         )
         .await;
 
         mock.assert_async().await;
 
-        assert_eq!(returned_hash, hash);
+        assert_eq!(returned_hash, setup.hash);
         assert!(matches!(result, Ok(None)));
     }
 
     #[tokio::test]
     async fn test_process_single_hash_downloads_with_compare_cache_mismatch() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let args = create_test_args(temp_dir.path().to_path_buf());
-        let hash = "AAAAA".to_string();
+        let mut setup = build_compare_cache_setup(
+            "BBBBB",
+            false,
+            "\"current-etag\"",
+            Some("\"previous-etag\""),
+            None,
+        )
+        .await;
 
-        let mut current_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("current.json"),
-        };
-        current_cache
-            .etags
-            .insert(hash.clone(), "\"current-etag\"".to_string());
-
-        let mut previous_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("previous.json"),
-        };
-        previous_cache
-            .etags
-            .insert(hash.clone(), "\"previous-etag\"".to_string());
-
-        let etag_cache = Arc::new(Mutex::new(current_cache));
-        let previous_etag_cache = Some(Arc::new(previous_cache));
-
+        let base_url = format!("{}/range/", setup.server.url());
         let client = reqwest::Client::new();
 
         let mock_data = "new content";
-        let mock = server
-            .mock("GET", "/range/AAAAA")
+        let mock = setup
+            .server
+            .mock("GET", "/range/BBBBB")
             .with_status(200)
             .with_header("etag", "\"new-etag\"")
             .with_body(mock_data)
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
 
         let (returned_hash, result) = process_single_hash(
-            hash.clone(),
+            setup.hash.clone(),
             client,
-            args,
-            etag_cache,
-            previous_etag_cache,
+            setup.args.clone(),
+            setup.etag_cache.clone(),
+            setup.previous_cache.clone(),
             &base_url,
         )
         .await;
 
         mock.assert_async().await;
 
-        assert_eq!(returned_hash, hash);
+        assert_eq!(returned_hash, setup.hash);
         let etag = result.unwrap();
         assert_eq!(etag, Some("\"new-etag\"".to_string()));
 
-        let file_path = temp_dir.path().join("AAAAA");
+        let file_path = setup.temp_dir.path().join(&setup.hash);
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, mock_data);
     }
 
     #[tokio::test]
     async fn test_process_single_hash_skips_with_compare_cache_and_resume() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.resume = true;
-        let hash = "AAAAA".to_string();
+        let mut setup =
+            build_compare_cache_setup("CCCCC", true, "\"etag\"", Some("\"etag\""), None).await;
 
-        let mut current_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("current.json"),
-        };
-        current_cache
-            .etags
-            .insert(hash.clone(), "\"etag\"".to_string());
-
-        let mut previous_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("previous.json"),
-        };
-        previous_cache
-            .etags
-            .insert(hash.clone(), "\"etag\"".to_string());
-
-        let etag_cache = Arc::new(Mutex::new(current_cache));
-        let previous_etag_cache = Some(Arc::new(previous_cache));
-
+        let base_url = format!("{}/range/", setup.server.url());
         let client = reqwest::Client::new();
 
-        let mock = server
-            .mock("GET", "/range/AAAAA")
+        let mock = setup
+            .server
+            .mock("GET", "/range/CCCCC")
             .expect_at_most(0)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
 
         let (returned_hash, result) = process_single_hash(
-            hash.clone(),
+            setup.hash.clone(),
             client,
-            args,
-            etag_cache,
-            previous_etag_cache,
+            setup.args.clone(),
+            setup.etag_cache.clone(),
+            setup.previous_cache.clone(),
             &base_url,
         )
         .await;
 
         mock.assert_async().await;
 
-        assert_eq!(returned_hash, hash);
+        assert_eq!(returned_hash, setup.hash);
         assert!(matches!(result, Ok(None)));
     }
 
     #[tokio::test]
     async fn test_process_single_hash_downloads_with_compare_cache_and_resume() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.resume = true;
-        let hash = "AAAAA".to_string();
+        let mut setup = build_compare_cache_setup(
+            "DDDDD",
+            true,
+            "\"existing-etag\"",
+            Some("\"stale-etag\""),
+            Some("old content"),
+        )
+        .await;
 
-        let mut current_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("current.json"),
-        };
-        current_cache
-            .etags
-            .insert(hash.clone(), "\"existing-etag\"".to_string());
-
-        let mut previous_cache = ETagCache {
-            etags: HashMap::new(),
-            path: temp_dir.path().join("previous.json"),
-        };
-        previous_cache
-            .etags
-            .insert(hash.clone(), "\"stale-etag\"".to_string());
-
-        let final_path = temp_dir.path().join(&hash);
-        fs::write(&final_path, "old content").await.unwrap();
-
-        let etag_cache = Arc::new(Mutex::new(current_cache));
-        let previous_etag_cache = Some(Arc::new(previous_cache));
-
+        let base_url = format!("{}/range/", setup.server.url());
         let client = reqwest::Client::new();
 
         let mock_data = "refreshed content";
-        let mock = server
-            .mock("GET", "/range/AAAAA")
+        let mock = setup
+            .server
+            .mock("GET", "/range/DDDDD")
             .match_header("if-none-match", "\"existing-etag\"")
             .with_status(200)
             .with_header("etag", "\"newer-etag\"")
@@ -376,24 +360,24 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
 
         let (returned_hash, result) = process_single_hash(
-            hash.clone(),
+            setup.hash.clone(),
             client,
-            args,
-            etag_cache,
-            previous_etag_cache,
+            setup.args.clone(),
+            setup.etag_cache.clone(),
+            setup.previous_cache.clone(),
             &base_url,
         )
         .await;
 
         mock.assert_async().await;
 
-        assert_eq!(returned_hash, hash);
+        assert_eq!(returned_hash, setup.hash);
         let etag = result.unwrap();
         assert_eq!(etag, Some("\"newer-etag\"".to_string()));
 
+        let final_path = setup.temp_dir.path().join(&setup.hash);
         let content = fs::read_to_string(&final_path).await.unwrap();
         assert_eq!(content, mock_data);
     }
