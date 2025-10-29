@@ -126,12 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(err) => {
                         tracing::error!("{err}");
                         // Remove etag on error to force re-download next time
-                        let mut cache = etag_cache.lock().await;
-                        cache.etags.remove(&hash);
+                        etag_cache.lock().await.etags.remove(&hash);
                     }
                     Ok(Some(etag)) => {
-                        let mut cache = etag_cache.lock().await;
-                        cache.etags.insert(hash, etag);
+                        etag_cache.lock().await.etags.insert(hash, etag);
                     }
                     Ok(None) => {
                         // File was not modified (304 response)
