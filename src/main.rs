@@ -48,8 +48,15 @@ async fn process_single_hash(
     client: reqwest::Client,
     args: Args,
     etag_cache: Arc<Mutex<ETagCache>>,
+    previous_etag_cache: Option<Arc<ETagCache>>,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
+    if let Some(prev_cache) = previous_etag_cache.as_ref()
+        && { etag_cache.lock().await.has_same_etag(prev_cache, &hash) }
+    {
+        return (hash, Ok(None));
+    }
+
     let etag = if args.resume {
         etag_cache.lock().await.etags.get(&hash).cloned()
     } else {
@@ -91,6 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
     let etag_cache = Arc::new(Mutex::new(ETagCache::load(&etag_cache_path).await?));
+    let previous_etag_cache = match args.compare_cache.as_ref() {
+        Some(path) => Some(Arc::new(ETagCache::load(path).await?)),
+        None => None,
+    };
 
     // Handle ctrl-c
     let token = CancellationToken::new();
@@ -110,11 +121,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .take_until(token.cancelled())
         .map(|hash| {
             let client = client.clone();
+            let compare_cache = previous_etag_cache.clone();
             let etag_cache = etag_cache.clone();
             let hash = format!("{hash:05X}");
             let args = args.clone();
 
-            let result = process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL);
+            let result =
+                process_single_hash(hash, client, args, etag_cache, compare_cache, HIBP_BASE_URL);
             span.pb_inc(1);
             result
         })

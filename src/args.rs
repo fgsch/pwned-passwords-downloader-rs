@@ -63,6 +63,10 @@ pub struct Args {
     #[arg(long, short, value_enum, default_value = "none")]
     pub compression: CompressionFormat,
 
+    /// Path to a previous ETag cache used to skip unchanged hashes
+    #[arg(long, value_name = "FILENAME")]
+    pub compare_cache: Option<PathBuf>,
+
     /// Maximum number of concurrent requests
     #[arg(long, default_value_t = 64, value_parser = parse_greater_than_zero)]
     pub max_concurrent_requests: usize,
@@ -139,6 +143,7 @@ pub fn parse_args() -> Result<(Args, Client), ArgsError> {
 pub fn create_test_args(output_dir: PathBuf) -> Args {
     Args {
         compression: CompressionFormat::None,
+        compare_cache: None,
         max_concurrent_requests: 1,
         max_retries: 3,
         resume: false,
@@ -152,6 +157,12 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+
+    #[test]
+    fn test_compare_cache_argument() {
+        let args = Args::try_parse_from(["cmd", "--compare-cache", "prev-etag.json"]).unwrap();
+        assert_eq!(args.compare_cache, Some(PathBuf::from("prev-etag.json")));
+    }
 
     #[test]
     fn test_parse_greater_than_zero_valid() {
