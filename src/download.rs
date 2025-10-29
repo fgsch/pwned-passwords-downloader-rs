@@ -241,14 +241,8 @@ mod tests {
 
         let base_url = server.url();
 
-        let result = download_hash(
-            "AAAAA",
-            client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("AAAAA", client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -314,14 +308,8 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash(
-            "CCCCC",
-            client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("CCCCC", client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -352,14 +340,8 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash(
-            "DDDDD",
-            client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("DDDDD", client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
@@ -398,14 +380,8 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = server.url();
 
-        let result = download_hash(
-            "EEEEE",
-            client,
-            None,
-            &args,
-            &format!("{base_url}/range/"),
-        )
-        .await;
+        let result =
+            download_hash("EEEEE", client, None, &args, &format!("{base_url}/range/")).await;
 
         mock.assert_async().await;
 
