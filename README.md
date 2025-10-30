@@ -83,6 +83,21 @@ Options:
           Print version
 ```
 
+### Resume cache
+
+Each run creates or refreshes an `.etag_cache.json` file in the
+chosen output directory. This cache stores the ETag returned for
+every downloaded range so a later run can resume from the next
+unfinished range instead of starting over.
+
+When `--resume` is left at its default (`true`), the tool reads the
+cache and issues conditional requests with `If-None-Match` to skip
+ranges that were already downloaded. Deleting the cache or invoking
+the tool with `--resume false` forces a full re-download.
+
+You can also keep a copy of the cache and pass it to `--compare-cache`
+to skip ranges that match an older snapshot.
+
 ## License
 
 MIT - see [LICENSE](LICENSE) file for details.
