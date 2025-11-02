@@ -46,7 +46,7 @@ const HASH_MAX: u64 = 0xFFFFF;
 async fn process_single_hash(
     hash: String,
     client: reqwest::Client,
-    args: Args,
+    args: Arc<Args>,
     etag_cache: Arc<Mutex<ETagCache>>,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
@@ -105,6 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.quiet {
         span.pb_start();
     }
+
+    let args = Arc::new(args);
 
     futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
