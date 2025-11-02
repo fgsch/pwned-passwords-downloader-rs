@@ -88,7 +88,7 @@ async fn write_hash_to_file(
 
     match tokio::io::copy(&mut reader, &mut file).await {
         Ok(_) => {
-            file.flush()
+            file.shutdown()
                 .and_then(|_| fs::rename(&part_path, &final_path))
                 .or_else(|source| async {
                     _ = fs::remove_file(&part_path).await;
