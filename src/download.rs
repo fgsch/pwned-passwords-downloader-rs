@@ -197,7 +197,9 @@ pub async fn download_hash(
         }
 
         if retry < args.max_retries - 1 {
-            sleep(Duration::from_secs(u64::pow(2, retry as u32))).await;
+            let delay = 2u64.saturating_pow(retry as u32);
+            let jitter = rand::random_range(delay / 2..=delay).max(1);
+            sleep(Duration::from_secs(jitter)).await;
         }
     }
 
