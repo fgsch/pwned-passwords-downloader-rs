@@ -168,7 +168,10 @@ pub async fn download_hash(
                     StatusCode::NOT_MODIFIED if !etag_value.is_empty() => {
                         return Ok(None);
                     }
-                    status_code if status_code.is_client_error() => {
+                    status_code
+                        if status_code.is_client_error()
+                            && status_code != StatusCode::TOO_MANY_REQUESTS =>
+                    {
                         return Err(DownloadError::Client {
                             hash: hash.to_string(),
                             status_code,
