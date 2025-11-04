@@ -18,8 +18,11 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use serde::{Deserialize, Serialize, Serializer};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+};
 use thiserror::Error;
 use tokio::fs;
 
@@ -43,9 +46,18 @@ pub enum CacheError {
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct ETagCache {
+    #[serde(serialize_with = "ordered_map")]
     pub etags: HashMap<String, String>,
     #[serde(skip)]
     pub path: PathBuf,
+}
+
+fn ordered_map<S: Serializer>(
+    value: &HashMap<String, String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let ordered: BTreeMap<_, _> = value.iter().collect();
+    ordered.serialize(serializer)
 }
 
 impl ETagCache {
