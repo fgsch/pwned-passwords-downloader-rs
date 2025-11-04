@@ -48,6 +48,7 @@ async fn process_single_hash(
     client: reqwest::Client,
     args: Arc<Args>,
     etag_cache: Arc<RwLock<ETagCache>>,
+    token: CancellationToken,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
     let etag = if args.incremental == IncrementalMode::False {
@@ -55,7 +56,11 @@ async fn process_single_hash(
     } else {
         etag_cache.read().await.etags.get(&hash).cloned()
     };
-    let result = download_hash(&hash, client, etag.as_deref(), &args, base_url).await;
+    let hash_clone = hash.clone();
+    let result = tokio::select! {
+        res = download_hash(&hash, client, etag.as_deref(), &args, base_url) => res,
+        _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash_clone }),
+    };
     (hash, result)
 }
 
@@ -115,8 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let etag_cache = etag_cache.clone();
             let hash = format!("{hash:05X}");
             let args = args.clone();
+            let token = token.clone();
 
-            process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL)
+            process_single_hash(hash, client, args, etag_cache, token, HIBP_BASE_URL)
         })
         .buffer_unordered(args.max_concurrent_requests)
         .for_each(|(hash, result)| {
@@ -124,16 +130,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let etag_cache = etag_cache.clone();
             async move {
                 match result {
-                    Err(err) => {
-                        tracing::error!("{err}");
-                        // Remove etag on error to force re-download next time
-                        etag_cache.write().await.etags.remove(&hash);
-                    }
                     Ok(Some(etag)) => {
                         etag_cache.write().await.etags.insert(hash, etag);
                     }
                     Ok(None) => {
                         // File was not modified (304 response)
+                    }
+                    Err(DownloadError::Cancelled { .. }) => {
+                        // Exit quickly
+                    }
+                    Err(err) => {
+                        tracing::error!("{err}");
+                        // Remove etag on error to force re-download next time
+                        etag_cache.write().await.etags.remove(&hash);
                     }
                 }
             }

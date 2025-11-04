@@ -20,7 +20,7 @@
 
 use futures::{TryFutureExt as _, TryStreamExt as _};
 use reqwest::{StatusCode, header};
-use std::{error::Error as _, path::Path, time::Duration};
+use std::{error::Error as _, io::ErrorKind, path::Path, time::Duration};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
@@ -36,6 +36,8 @@ pub enum DownloadError {
         #[source]
         source: std::io::Error,
     },
+    #[error("Downloads for hash {hash} cancelled")]
+    Cancelled { hash: String },
     #[error("Client error {status_code} for hash {hash}: not retrying")]
     Client {
         hash: String,
@@ -69,11 +71,28 @@ impl From<InternalDownloadError> for DownloadError {
     }
 }
 
+struct TempFileGuard<'a> {
+    path: &'a Path,
+    cleanup: bool,
+}
+
+impl Drop for TempFileGuard<'_> {
+    fn drop(&mut self) {
+        if self.cleanup {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
 async fn write_hash_to_file(
     response: reqwest::Response,
     final_path: &Path,
 ) -> Result<(), InternalDownloadError> {
     let part_path = final_path.with_extension("part");
+    let mut guard = TempFileGuard {
+        path: part_path.as_path(),
+        cleanup: true,
+    };
 
     let mut file = fs::File::create(&part_path).await.map_err(|source| {
         InternalDownloadError::Fatal(DownloadError::FileOperation {
@@ -88,8 +107,19 @@ async fn write_hash_to_file(
 
     match tokio::io::copy(&mut reader, &mut file).await {
         Ok(_) => {
+            let final_path_buf = final_path.to_path_buf();
             file.shutdown()
-                .and_then(|_| fs::rename(&part_path, &final_path))
+                .and_then(|_| {
+                    let part_path = part_path.clone();
+                    async move {
+                        match fs::remove_file(&final_path_buf).await {
+                            Ok(_) => {}
+                            Err(err) if err.kind() == ErrorKind::NotFound => {}
+                            Err(err) => return Err(err),
+                        }
+                        fs::rename(&part_path, &final_path_buf).await
+                    }
+                })
                 .or_else(|source| async {
                     _ = fs::remove_file(&part_path).await;
                     Err(InternalDownloadError::Fatal(DownloadError::FileOperation {
@@ -99,6 +129,7 @@ async fn write_hash_to_file(
                     }))
                 })
                 .await?;
+            guard.cleanup = false;
             Ok(())
         }
         Err(err) => {
