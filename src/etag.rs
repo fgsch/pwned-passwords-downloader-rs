@@ -77,49 +77,4 @@ impl ETagCache {
             })?;
         Ok(())
     }
-
-    pub fn has_same_etag(&self, other: &ETagCache, hash: &str) -> bool {
-        self.etags.get(hash) == other.etags.get(hash)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn build_cache(entries: &[(&str, &str)], path: &str) -> ETagCache {
-        let mut map = HashMap::new();
-        for (hash, etag) in entries {
-            map.insert((*hash).to_string(), (*etag).to_string());
-        }
-        ETagCache {
-            etags: map,
-            path: PathBuf::from(path),
-        }
-    }
-
-    #[test]
-    fn test_has_same_etag_true() {
-        let current = build_cache(&[("AAAAA", "\"etag\"")], "current.json");
-        let previous = build_cache(&[("AAAAA", "\"etag\"")], "previous.json");
-
-        assert!(current.has_same_etag(&previous, "AAAAA"));
-    }
-
-    #[test]
-    fn test_has_same_etag_false_when_missing() {
-        let current = build_cache(&[], "current.json");
-        let previous = build_cache(&[("AAAAA", "\"etag\"")], "previous.json");
-
-        assert!(!current.has_same_etag(&previous, "AAAAA"));
-    }
-
-    #[test]
-    fn test_has_same_etag_false_when_different() {
-        let current = build_cache(&[("AAAAA", "\"etag-a\"")], "current.json");
-        let previous = build_cache(&[("AAAAA", "\"etag-b\"")], "previous.json");
-
-        assert!(!current.has_same_etag(&previous, "AAAAA"));
-    }
 }
