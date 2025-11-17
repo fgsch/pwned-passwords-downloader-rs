@@ -33,7 +33,7 @@ use tracing_subscriber::{
     fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
-use args::{Args, parse_args};
+use args::{Args, IncrementalMode, parse_args};
 use download::{DownloadError, download_hash};
 use etag::ETagCache;
 
@@ -50,10 +50,10 @@ async fn process_single_hash(
     etag_cache: Arc<Mutex<ETagCache>>,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
-    let etag = if args.resume {
-        etag_cache.lock().await.etags.get(&hash).cloned()
-    } else {
+    let etag = if args.incremental == IncrementalMode::False {
         None
+    } else {
+        etag_cache.lock().await.etags.get(&hash).cloned()
     };
     let result = download_hash(&hash, client, etag.as_deref(), &args, base_url).await;
     (hash, result)

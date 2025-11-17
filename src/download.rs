@@ -25,7 +25,7 @@ use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
 
-use crate::args::Args;
+use crate::args::{Args, IncrementalMode};
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
@@ -123,14 +123,20 @@ pub async fn download_hash(
 ) -> Result<Option<String>, DownloadError> {
     let ext = args.compression.as_str();
     let final_path = args.output_directory.join(hash).with_extension(ext);
+    let etag_value = match (etag, &args.incremental) {
+        (Some(etag), IncrementalMode::Always) => etag,
+        (Some(etag), IncrementalMode::True)
+            if fs::try_exists(&final_path).await.unwrap_or(false) =>
+        {
+            etag
+        }
+        _ => "",
+    };
 
     for retry in 0..args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
 
-        if args.resume
-            && final_path.exists()
-            && let Some(etag_value) = etag
-        {
+        if !etag_value.is_empty() {
             request = request.header(header::IF_NONE_MATCH, etag_value);
         }
 
@@ -159,7 +165,7 @@ pub async fn download_hash(
                             }
                         }
                     }
-                    StatusCode::NOT_MODIFIED if args.resume => {
+                    StatusCode::NOT_MODIFIED if !etag_value.is_empty() => {
                         return Ok(None);
                     }
                     status_code if status_code.is_client_error() => {
@@ -244,7 +250,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.resume = true;
+        args.incremental = IncrementalMode::True;
 
         let file_path = temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
@@ -267,6 +273,32 @@ mod tests {
         assert!(result.is_ok());
         let etag = result.unwrap();
         assert_eq!(etag, None);
+    }
+
+    #[tokio::test]
+    async fn download_hash_with_incremental_always() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.incremental = IncrementalMode::Always;
+
+        let client = reqwest::Client::new();
+
+        let mock = server
+            .mock("GET", "/range/GGGGG")
+            .match_header("if-none-match", "\"cached-etag\"")
+            .with_status(304)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let result =
+            download_hash("GGGGG", client, Some("\"cached-etag\""), &args, &base_url).await;
+
+        mock.assert_async().await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 
     #[tokio::test]

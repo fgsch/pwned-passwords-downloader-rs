@@ -50,11 +50,11 @@ pwned-passwords-downloader-rs --max-concurrent-requests 100
 # Quiet mode (no progress bar)
 pwned-passwords-downloader-rs --quiet
 
-# Skip ranges unchanged since the previous run
-pwned-passwords-downloader-rs --compare-cache /path/to/old/.etag_cache.json
+# Force a full download
+pwned-passwords-downloader-rs --incremental false
 
-# Disable resume functionality
-pwned-passwords-downloader-rs --resume false
+# Only download changed or missing hashes
+pwned-passwords-downloader-rs --incremental always
 ```
 
 ### All options
@@ -63,40 +63,39 @@ pwned-passwords-downloader-rs --resume false
 Options:
   -c, --compression <COMPRESSION>
           Compression format for storing downloaded hashes [default: none] [possible values: none, brotli, gzip]
+      --incremental [<MODE>]
+          Continue from a previous download and fetch only changed or missing hashes [default: true] [possible values: always, false, true]
       --max-concurrent-requests <MAX_CONCURRENT_REQUESTS>
           Maximum number of concurrent requests [default: 64]
       --max-retries <MAX_RETRIES>
           Number of retry attempts for failed requests [default: 5]
-      --resume [<RESUME>]
-          Resume previous download session [default: true] [possible values: true, false]
-      --compare-cache <FILENAME>
-          Path to a previous ETag cache used to skip unchanged hashes
   -o, --output-directory <OUTPUT_DIRECTORY>
           Directory for storing downloaded hashes [default: .]
   -q, --quiet
           Disable progress bar output
   -u, --user-agent <USER_AGENT>
-          User-Agent string for HTTP requests [default: hibp-downloader/0.1]
+          User-Agent string for HTTP requests [default: hibp-downloader/0.3]
   -h, --help
           Print help (see more with '--help')
   -V, --version
           Print version
 ```
 
-### Resume cache
+### Incremental mode
 
-Each run creates or refreshes an `.etag_cache.json` file in the
-chosen output directory. This cache stores the ETag returned for
-every downloaded range so a later run can resume from the next
-unfinished range instead of starting over.
+Each run creates or updates an `.etag_cache.json` file in the output
+directory. This cache stores the ETag for each downloaded range so
+later runs can avoid starting over.
 
-When `--resume` is left at its default (`true`), the tool reads the
-cache and issues conditional requests with `If-None-Match` to skip
-ranges that were already downloaded. Deleting the cache or invoking
-the tool with `--resume false` forces a full re-download.
+With `--incremental` (the default), the tool uses this cache to
+skip unchanged ranges via `If-None-Match`. If a range’s file is
+missing, it is downloaded unconditionally.
+Use `--incremental always` to always issue conditional requests,
+even when files are missing. Deleting the cache or using `--incremental
+false` forces a full re-download.
 
-You can also keep a copy of the cache and pass it to `--compare-cache`
-to skip ranges that match an older snapshot.
+Because the cache tracks the last-seen ETags, incremental mode also
+fetches any ranges that have changed since the previous run.
 
 ## License
 

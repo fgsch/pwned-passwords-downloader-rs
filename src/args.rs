@@ -52,6 +52,13 @@ impl CompressionFormat {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+pub enum IncrementalMode {
+    Always,
+    False,
+    True,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     version,
@@ -63,6 +70,10 @@ pub struct Args {
     #[arg(long, short, value_enum, default_value = "none")]
     pub compression: CompressionFormat,
 
+    /// Continue from a previous download and fetch only changed or missing hashes
+    #[arg(long, num_args(0..=1), value_name = "MODE", value_enum, default_value = "true", default_missing_value = "true")]
+    pub incremental: IncrementalMode,
+
     /// Maximum number of concurrent requests
     #[arg(long, default_value_t = 64, value_parser = parse_greater_than_zero)]
     pub max_concurrent_requests: usize,
@@ -70,10 +81,6 @@ pub struct Args {
     /// Number of retry attempts for failed requests
     #[arg(long, default_value_t = 5, value_parser = parse_greater_than_zero)]
     pub max_retries: usize,
-
-    /// Resume previous download session
-    #[arg(long, num_args=0..=1, default_value_t = true)]
-    pub resume: bool,
 
     /// Directory for storing downloaded hashes
     #[arg(long, short, default_value = ".")]
@@ -141,7 +148,7 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
         compression: CompressionFormat::None,
         max_concurrent_requests: 1,
         max_retries: 3,
-        resume: false,
+        incremental: IncrementalMode::False,
         output_directory: output_dir,
         quiet: true,
         user_agent: "test-agent/1.0".to_string(),
