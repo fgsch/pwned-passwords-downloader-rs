@@ -20,7 +20,7 @@
 
 use futures::{TryFutureExt as _, TryStreamExt as _};
 use reqwest::{StatusCode, header};
-use std::{error::Error as _, path::PathBuf, time::Duration};
+use std::{error::Error as _, path::Path, time::Duration};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
@@ -71,7 +71,7 @@ impl From<InternalDownloadError> for DownloadError {
 
 async fn write_hash_to_file(
     response: reqwest::Response,
-    final_path: &PathBuf,
+    final_path: &Path,
 ) -> Result<(), InternalDownloadError> {
     let part_path = final_path.with_extension("part");
 
@@ -192,7 +192,9 @@ pub async fn download_hash(
                 if retry == args.max_retries - 1 {
                     return Err(DownloadError::Network {
                         hash: hash.to_string(),
-                        error: err.source().map_or(err.to_string(), |e| e.to_string()),
+                        error: err
+                            .source()
+                            .map_or_else(|| err.to_string(), |e| e.to_string()),
                         retries: args.max_retries,
                     });
                 }
