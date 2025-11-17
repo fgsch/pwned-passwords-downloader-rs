@@ -114,12 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hash = format!("{hash:05X}");
             let args = args.clone();
 
-            let result = process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL);
-            span.pb_inc(1);
-            result
+            process_single_hash(hash, client, args, etag_cache, HIBP_BASE_URL)
         })
         .buffer_unordered(args.max_concurrent_requests)
         .for_each(|(hash, result)| {
+            span.pb_inc(1);
             let etag_cache = etag_cache.clone();
             async move {
                 match result {
