@@ -161,7 +161,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     #[test]
-    fn test_parse_greater_than_zero_valid() {
+    fn parse_greater_than_zero_valid() {
         assert_eq!(parse_greater_than_zero("1").unwrap(), 1);
         assert_eq!(parse_greater_than_zero("5").unwrap(), 5);
         assert_eq!(parse_greater_than_zero("100").unwrap(), 100);
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_greater_than_zero_invalid_zero() {
+    fn parse_greater_than_zero_invalid_zero() {
         let result = parse_greater_than_zero("0");
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_greater_than_zero_invalid_non_numeric() {
+    fn parse_greater_than_zero_invalid_non_numeric() {
         let result = parse_greater_than_zero("abc");
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_greater_than_zero_invalid_negative() {
+    fn parse_greater_than_zero_invalid_negative() {
         let result = parse_greater_than_zero("-1");
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_greater_than_zero_invalid_empty() {
+    fn parse_greater_than_zero_invalid_empty() {
         let result = parse_greater_than_zero("");
         assert!(result.is_err());
         let error = result.unwrap_err();

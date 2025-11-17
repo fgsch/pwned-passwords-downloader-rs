@@ -213,7 +213,7 @@ mod tests {
     use tokio::fs;
 
     #[tokio::test]
-    async fn test_download_hash_success() {
+    async fn download_hash_success() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_hash_not_modified() {
+    async fn download_hash_not_modified() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_hash_client_error() {
+    async fn download_hash_client_error() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_download_hash_server_error_with_retry() {
+    async fn download_hash_server_error_with_retry() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_hash_with_compression() {
+    async fn download_hash_with_compression() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_hash_to_file_success() {
+    async fn write_hash_to_file_success() {
         let temp_dir = TempDir::new().unwrap();
         let final_path = temp_dir.path().join("FFFFF");
 
