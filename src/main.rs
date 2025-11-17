@@ -25,7 +25,7 @@ mod etag;
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
 use std::sync::Arc;
-use tokio::{fs, sync::Mutex};
+use tokio::{fs, sync::RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
@@ -47,13 +47,13 @@ async fn process_single_hash(
     hash: String,
     client: reqwest::Client,
     args: Arc<Args>,
-    etag_cache: Arc<Mutex<ETagCache>>,
+    etag_cache: Arc<RwLock<ETagCache>>,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
     let etag = if args.incremental == IncrementalMode::False {
         None
     } else {
-        etag_cache.lock().await.etags.get(&hash).cloned()
+        etag_cache.read().await.etags.get(&hash).cloned()
     };
     let result = download_hash(&hash, client, etag.as_deref(), &args, base_url).await;
     (hash, result)
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
-    let etag_cache = Arc::new(Mutex::new(ETagCache::load(&etag_cache_path).await?));
+    let etag_cache = Arc::new(RwLock::new(ETagCache::load(&etag_cache_path).await?));
 
     // Handle ctrl-c
     let token = CancellationToken::new();
@@ -127,10 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(err) => {
                         tracing::error!("{err}");
                         // Remove etag on error to force re-download next time
-                        etag_cache.lock().await.etags.remove(&hash);
+                        etag_cache.write().await.etags.remove(&hash);
                     }
                     Ok(Some(etag)) => {
-                        etag_cache.lock().await.etags.insert(hash, etag);
+                        etag_cache.write().await.etags.insert(hash, etag);
                     }
                     Ok(None) => {
                         // File was not modified (304 response)
@@ -141,8 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     // Save ETag cache
-    let final_cache = etag_cache.lock().await;
-    if let Err(err) = final_cache.save().await {
+    if let Err(err) = etag_cache.write().await.save().await {
         tracing::error!("{err}");
     }
 
