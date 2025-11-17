@@ -34,6 +34,12 @@ pub enum CacheError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("Failed to read ETag cache from {path}: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Failed to serialize ETag cache: {0}")]
     Serialize(#[from] serde_json::Error),
     #[error("Failed to write ETag cache to {path}: {source}")]
@@ -71,7 +77,13 @@ impl ETagCache {
                     })?
                     .etags
             }
-            Err(_) => HashMap::new(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(err) => {
+                return Err(CacheError::Read {
+                    path: path.display().to_string(),
+                    source: err,
+                });
+            }
         };
         Ok(Self {
             etags,
