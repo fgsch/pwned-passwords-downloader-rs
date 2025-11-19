@@ -74,7 +74,7 @@ Options:
   -q, --quiet
           Disable progress bar output
   -u, --user-agent <USER_AGENT>
-          User-Agent string for HTTP requests [default: hibp-downloader/0.3]
+          User-Agent string for HTTP requests [default: hibp-downloader/0.4]
   -h, --help
           Print help (see more with '--help')
   -V, --version
