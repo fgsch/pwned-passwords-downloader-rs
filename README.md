@@ -73,6 +73,8 @@ Options:
           Directory for storing downloaded hashes [default: .]
   -q, --quiet
           Disable progress bar output
+      --request-timeout <SECONDS>
+          Request timeout in seconds [default: 30]
   -u, --user-agent <USER_AGENT>
           User-Agent string for HTTP requests [default: hibp-downloader/0.4]
   -h, --help

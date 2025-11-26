@@ -26,7 +26,7 @@ use reqwest::{
     Client,
     header::{self, HeaderMap, HeaderValue},
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -90,6 +90,10 @@ pub struct Args {
     #[arg(long, short, default_value_t = false)]
     pub quiet: bool,
 
+    /// Request timeout in seconds
+    #[arg(long, value_name = "SECONDS", default_value = "30", value_parser = parse_duration_seconds)]
+    pub request_timeout: Duration,
+
     /// User-Agent string for HTTP requests
     #[arg(long, short, default_value_t = concat!("hibp-downloader/",
         env!("CARGO_PKG_VERSION_MAJOR"),
@@ -115,6 +119,11 @@ fn parse_greater_than_zero(s: &str) -> Result<usize, Error> {
     }
 }
 
+fn parse_duration_seconds(s: &str) -> Result<Duration, Error> {
+    let seconds = parse_greater_than_zero(s)?;
+    Ok(Duration::from_secs(seconds as u64))
+}
+
 pub fn parse_args() -> Result<(Args, Client), ArgsError> {
     let args = Args::parse();
 
@@ -132,6 +141,7 @@ pub fn parse_args() -> Result<(Args, Client), ArgsError> {
 
     let mut client_builder = reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(args.request_timeout)
         .user_agent(&args.user_agent);
 
     // If compression is enabled, disable auto-decompression.
@@ -150,6 +160,7 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
         max_retries: 3,
         incremental: IncrementalMode::False,
         output_directory: output_dir,
+        request_timeout: Duration::from_secs(30),
         quiet: true,
         user_agent: "test-agent/1.0".to_string(),
     }
@@ -159,6 +170,7 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+    use std::time::Duration;
 
     #[test]
     fn parse_greater_than_zero_valid() {
@@ -202,5 +214,23 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(error.to_string().contains("`` isn't a valid integer"));
+    }
+
+    #[test]
+    fn parse_duration_seconds_valid() {
+        assert_eq!(parse_duration_seconds("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            parse_duration_seconds("30").unwrap(),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn parse_duration_seconds_invalid_zero() {
+        let result = parse_duration_seconds("0");
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("Value must be greater than 0"));
     }
 }
