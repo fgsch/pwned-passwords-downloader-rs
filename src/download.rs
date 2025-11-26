@@ -25,7 +25,7 @@ use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
 
-use crate::args::{Args, IncrementalMode};
+use crate::args::Args;
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
@@ -154,14 +154,13 @@ pub async fn download_hash(
 ) -> Result<Option<String>, DownloadError> {
     let ext = args.compression.as_str();
     let final_path = args.output_directory.join(hash).with_extension(ext);
-    let etag_value = match (etag, &args.incremental) {
-        (Some(etag), IncrementalMode::Always) => etag,
-        (Some(etag), IncrementalMode::True)
-            if fs::try_exists(&final_path).await.unwrap_or(false) =>
-        {
-            etag
-        }
-        _ => "",
+    let etag_value = if let Some(etag) = etag
+        && args.incremental
+        && (args.ignore_missing_hash_file || fs::try_exists(&final_path).await.unwrap_or(false))
+    {
+        etag
+    } else {
+        ""
     };
 
     for retry in 0..args.max_retries {
@@ -288,7 +287,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.incremental = IncrementalMode::True;
+        args.incremental = true;
 
         let file_path = temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
@@ -314,11 +313,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_hash_with_incremental_always() {
+    async fn download_hash_with_ignore_missing_hash_file() {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.incremental = IncrementalMode::Always;
+        args.incremental = true;
+        args.ignore_missing_hash_file = true;
 
         let client = reqwest::Client::new();
 

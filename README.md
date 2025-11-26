@@ -53,8 +53,8 @@ pwned-passwords-downloader-rs --quiet
 # Force a full download
 pwned-passwords-downloader-rs --incremental false
 
-# Only download changed or missing hashes
-pwned-passwords-downloader-rs --incremental always
+# Sync-style run using an existing .etag_cache.json (skips unchanged ranges even if files are missing)
+pwned-passwords-downloader-rs --ignore-missing-hash-file
 ```
 
 ### All options
@@ -64,7 +64,9 @@ Options:
   -c, --compression <COMPRESSION>
           Compression format for storing downloaded hashes [default: none] [possible values: none, brotli, gzip]
       --incremental [<MODE>]
-          Continue from a previous download and fetch only changed or missing hashes [default: true] [possible values: always, false, true]
+          Continue from a previous download and fetch only changed or missing hashes [default: true] [possible values: false, true]
+      --ignore-missing-hash-file
+          Issue conditional requests even when the hash file is missing locally [default: false]
       --max-concurrent-requests <MAX_CONCURRENT_REQUESTS>
           Maximum number of concurrent requests [default: 64]
       --max-retries <MAX_RETRIES>
@@ -76,7 +78,7 @@ Options:
       --request-timeout <SECONDS>
           Request timeout in seconds [default: 30]
   -u, --user-agent <USER_AGENT>
-          User-Agent string for HTTP requests [default: hibp-downloader/0.4]
+          User-Agent string for HTTP requests [default: hibp-downloader/0.5]
   -h, --help
           Print help (see more with '--help')
   -V, --version
@@ -91,10 +93,11 @@ later runs can avoid starting over.
 
 With `--incremental` (the default), the tool uses this cache to
 skip unchanged ranges via `If-None-Match`. If a range’s file is
-missing, it is downloaded unconditionally.
-Use `--incremental always` to always issue conditional requests,
-even when files are missing. Deleting the cache or using `--incremental
-false` forces a full re-download.
+missing, it is downloaded unconditionally. Use
+`--ignore-missing-hash-file` to always issue conditional requests,
+even when files are missing (useful if you copy `.etag_cache.json`
+to another machine and only want to fetch ranges that changed). Deleting
+the cache or using `--incremental false` forces a full re-download.
 
 Because the cache tracks the last-seen ETags, incremental mode also
 fetches any ranges that have changed since the previous run.

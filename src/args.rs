@@ -52,13 +52,6 @@ impl CompressionFormat {
     }
 }
 
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
-pub enum IncrementalMode {
-    Always,
-    False,
-    True,
-}
-
 #[derive(Parser, Debug, Clone)]
 #[command(
     version,
@@ -71,8 +64,12 @@ pub struct Args {
     pub compression: CompressionFormat,
 
     /// Continue from a previous download and fetch only changed or missing hashes
-    #[arg(long, num_args(0..=1), value_name = "MODE", value_enum, default_value = "true", default_missing_value = "true")]
-    pub incremental: IncrementalMode,
+    #[arg(long, num_args(0..=1), default_value_t = true)]
+    pub incremental: bool,
+
+    /// Issue conditional requests even when the hash file is missing locally
+    #[arg(long, default_value_t = false)]
+    pub ignore_missing_hash_file: bool,
 
     /// Maximum number of concurrent requests
     #[arg(long, default_value_t = 64, value_parser = parse_greater_than_zero)]
@@ -158,7 +155,8 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
         compression: CompressionFormat::None,
         max_concurrent_requests: 1,
         max_retries: 3,
-        incremental: IncrementalMode::False,
+        incremental: false,
+        ignore_missing_hash_file: false,
         output_directory: output_dir,
         request_timeout: Duration::from_secs(30),
         quiet: true,

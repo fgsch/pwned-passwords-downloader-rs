@@ -33,7 +33,7 @@ use tracing_subscriber::{
     fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
-use args::{Args, IncrementalMode, parse_args};
+use args::{Args, parse_args};
 use download::{DownloadError, download_hash};
 use etag::ETagCache;
 
@@ -51,10 +51,10 @@ async fn process_single_hash(
     token: CancellationToken,
     base_url: &str,
 ) -> (String, Result<Option<String>, DownloadError>) {
-    let etag = if args.incremental == IncrementalMode::False {
-        None
-    } else {
+    let etag = if args.incremental {
         etag_cache.read().await.etags.get(&hash).cloned()
+    } else {
+        None
     };
     let hash_clone = hash.clone();
     let result = tokio::select! {
