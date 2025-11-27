@@ -66,7 +66,6 @@ async fn process_single_hash(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (args, client) = parse_args()?;
 
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
@@ -92,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create output directory.
     fs::create_dir_all(&args.output_directory).await?;
+    let (args, client) = parse_args()?;
 
     // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
