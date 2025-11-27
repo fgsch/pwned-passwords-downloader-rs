@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             _ = tokio::signal::ctrl_c().await;
             token.cancel();
-            tracing::info!("Received Ctrl-C: terminating.");
+            tracing::info!("Received ctrl-c; terminating.");
         }
     });
 
