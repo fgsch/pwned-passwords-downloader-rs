@@ -95,7 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
-    let etag_cache = Arc::new(RwLock::new(ETagCache::load(&etag_cache_path).await?));
+    let etag_cache = Arc::new(RwLock::new(
+        ETagCache::load_with_mode(&etag_cache_path, args.hash_mode.clone()).await?,
+    ));
 
     // Handle ctrl-c
     let token = CancellationToken::new();

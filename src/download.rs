@@ -25,7 +25,7 @@ use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
 use tokio_util::io::StreamReader;
 
-use crate::args::Args;
+use crate::args::{Args, HashMode};
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
@@ -166,6 +166,10 @@ pub async fn download_hash(
     for retry in 0..args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
 
+        if matches!(args.hash_mode, HashMode::Ntlm) {
+            request = request.query(&[("mode", "ntlm")]);
+        }
+
         if !etag_value.is_empty() {
             request = request.header(header::IF_NONE_MATCH, etag_value);
         }
@@ -244,8 +248,8 @@ pub async fn download_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{CompressionFormat, create_test_args};
-    use mockito::Server;
+    use crate::args::{CompressionFormat, HashMode, create_test_args};
+    use mockito::{Matcher, Server};
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -280,6 +284,31 @@ mod tests {
 
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, mock_data);
+    }
+
+    #[tokio::test]
+    async fn download_hash_ntlm_mode() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.hash_mode = HashMode::Ntlm;
+
+        let client = reqwest::Client::new();
+
+        let mock = server
+            .mock("GET", "/range/HHHHH")
+            .match_query(Matcher::UrlEncoded("mode".to_string(), "ntlm".to_string()))
+            .with_status(200)
+            .with_body("ntlm data")
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let result = download_hash("HHHHH", client, None, &args, &base_url).await;
+
+        mock.assert_async().await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

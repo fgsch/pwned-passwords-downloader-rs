@@ -15,6 +15,7 @@ and multiple compression formats.
 - **Resume support**: Automatically resumes interrupted downloads using ETag caching
 - **Cache comparison**: Optionally skip ranges that match a previous ETag snapshot
 - **Compression support**: Save storage space with Brotli, Gzip, or no compression
+- **Hash mode support**: Download SHA-1 (default) or NTLM hash ranges
 - **Progress tracking**: Visual progress bar with ETA
 - **Retry mechanism**: Configurable retry attempts for failed requests
 
@@ -63,10 +64,12 @@ pwned-passwords-downloader-rs --ignore-missing-hash-file
 Options:
   -c, --compression <COMPRESSION>
           Compression format for storing downloaded hashes [default: none] [possible values: none, brotli, gzip]
-      --incremental [<MODE>]
-          Continue from a previous download and fetch only changed or missing hashes [default: true] [possible values: false, true]
+      --hash-mode <HASH_MODE>
+          Download hashes using the selected mode [default: sha1] [possible values: ntlm, sha1]
       --ignore-missing-hash-file
-          Issue conditional requests even when the hash file is missing locally [default: false]
+          In incremental mode, issue conditional requests even if the hash file is missing
+      --incremental [<INCREMENTAL>]
+          Continue from a previous download and fetch only changed or missing hashes [default: true] [possible values: true, false]
       --max-concurrent-requests <MAX_CONCURRENT_REQUESTS>
           Maximum number of concurrent requests [default: 64]
       --max-retries <MAX_RETRIES>
@@ -75,7 +78,7 @@ Options:
           Directory for storing downloaded hashes [default: .]
   -q, --quiet
           Disable progress bar output
-      --request-timeout <SECONDS>
+      --request-timeout <REQUEST_TIMEOUT>
           Request timeout in seconds [default: 30]
   -u, --user-agent <USER_AGENT>
           User-Agent string for HTTP requests [default: hibp-downloader/0.5]

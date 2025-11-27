@@ -26,6 +26,7 @@ use reqwest::{
     Client,
     header::{self, HeaderMap, HeaderValue},
 };
+use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 use thiserror::Error;
 
@@ -52,6 +53,22 @@ impl CompressionFormat {
     }
 }
 
+#[derive(clap::ValueEnum, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum HashMode {
+    Ntlm,
+    #[default]
+    Sha1,
+}
+
+impl HashMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HashMode::Ntlm => "ntlm",
+            HashMode::Sha1 => "sha1",
+        }
+    }
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     version,
@@ -63,13 +80,17 @@ pub struct Args {
     #[arg(long, short, value_enum, default_value = "none")]
     pub compression: CompressionFormat,
 
+    /// Download hashes using the selected mode
+    #[arg(long, value_enum, default_value_t = HashMode::Sha1)]
+    pub hash_mode: HashMode,
+
+    /// In incremental mode, issue conditional requests even if the hash file is missing
+    #[arg(long, default_value_t = false)]
+    pub ignore_missing_hash_file: bool,
+
     /// Continue from a previous download and fetch only changed or missing hashes
     #[arg(long, num_args(0..=1), default_value_t = true)]
     pub incremental: bool,
-
-    /// Issue conditional requests even when the hash file is missing locally
-    #[arg(long, default_value_t = false)]
-    pub ignore_missing_hash_file: bool,
 
     /// Maximum number of concurrent requests
     #[arg(long, default_value_t = 64, value_parser = parse_greater_than_zero)]
@@ -88,7 +109,7 @@ pub struct Args {
     pub quiet: bool,
 
     /// Request timeout in seconds
-    #[arg(long, value_name = "SECONDS", default_value = "30", value_parser = parse_duration_seconds)]
+    #[arg(long, default_value = "30", value_parser = parse_duration_seconds)]
     pub request_timeout: Duration,
 
     /// User-Agent string for HTTP requests
@@ -156,6 +177,7 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
         max_concurrent_requests: 1,
         max_retries: 3,
         incremental: false,
+        hash_mode: HashMode::Sha1,
         ignore_missing_hash_file: false,
         output_directory: output_dir,
         request_timeout: Duration::from_secs(30),
