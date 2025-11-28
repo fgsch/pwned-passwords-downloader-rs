@@ -79,7 +79,10 @@ struct TempFileGuard<'a> {
 impl Drop for TempFileGuard<'_> {
     fn drop(&mut self) {
         if self.cleanup {
-            let _ = std::fs::remove_file(self.path);
+            let path = self.path.to_path_buf();
+            tokio::spawn(async move {
+                let _ = tokio::fs::remove_file(path).await;
+            });
         }
     }
 }
