@@ -65,8 +65,14 @@ async fn process_single_hash(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(err) = try_main().await {
+        tracing::error!("{err}");
+        std::process::exit(1);
+    }
+}
 
+async fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {pos:>7}/{len:7} ({percent:>3}%) ETA: {eta}",
