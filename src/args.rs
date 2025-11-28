@@ -34,6 +34,8 @@ use thiserror::Error;
 pub enum ArgsError {
     #[error("Failed to build HTTP client: {0}")]
     ClientBuild(#[from] reqwest::Error),
+    #[error("Failed to create output directory: {0}")]
+    CreateDirectory(#[from] std::io::Error),
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -166,6 +168,9 @@ pub fn parse_args() -> Result<(Args, Client), ArgsError> {
     if !matches!(args.compression, CompressionFormat::None) {
         client_builder = client_builder.no_gzip().no_brotli();
     }
+
+    // Create output directory.
+    std::fs::create_dir_all(&args.output_directory)?;
 
     Ok((args, client_builder.build()?))
 }

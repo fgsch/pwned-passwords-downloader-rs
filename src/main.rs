@@ -25,7 +25,7 @@ mod etag;
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
 use std::sync::Arc;
-use tokio::{fs, sync::RwLock};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
@@ -95,8 +95,6 @@ async fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let span = tracing::info_span!("span");
     span.pb_set_length(HASH_MAX + 1);
 
-    // Create output directory.
-    fs::create_dir_all(&args.output_directory).await?;
     let (args, client) = parse_args()?;
 
     // Load ETag cache
