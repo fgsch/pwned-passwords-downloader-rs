@@ -79,9 +79,9 @@ fn ordered_map<S: Serializer>(
 }
 
 impl ETagCache {
-    pub async fn load_with_mode(path: &Path, mode: HashMode) -> Result<Self, CacheError> {
+    pub async fn load(path: &Path, mode: HashMode, incremental: bool) -> Result<Self, CacheError> {
         let etags = match fs::read_to_string(path).await {
-            Ok(content) => serde_json::from_str::<ETagCache>(&content)
+            Ok(content) if incremental => serde_json::from_str::<ETagCache>(&content)
                 .map_err(|source| CacheError::Parse {
                     path: path.display().to_string(),
                     source,
@@ -97,6 +97,13 @@ impl ETagCache {
                         })
                     }
                 })?,
+            Ok(_) => {
+                tracing::warn!(
+                    "Ignoring existing ETag cache at {}; incremental mode disabled",
+                    path.display()
+                );
+                HashMap::new()
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(err) => {
                 return Err(CacheError::Read {
@@ -131,7 +138,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn load_with_mode_accepts_matching_mode() {
+    async fn load_accepts_matching_mode() {
         let temp_dir = TempDir::new().unwrap();
         let cache_path = temp_dir.path().join(".etag_cache.json");
         let cache = json!({
@@ -140,7 +147,7 @@ mod tests {
         });
         fs::write(&cache_path, cache.to_string()).await.unwrap();
 
-        let cache = ETagCache::load_with_mode(&cache_path, HashMode::Ntlm)
+        let cache = ETagCache::load(&cache_path, HashMode::Ntlm, true)
             .await
             .unwrap();
 
@@ -152,7 +159,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_with_mode_rejects_mode_mismatch() {
+    async fn load_rejects_mode_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let cache_path = temp_dir.path().join(".etag_cache.json");
         let cache = json!({
@@ -161,7 +168,7 @@ mod tests {
         });
         fs::write(&cache_path, cache.to_string()).await.unwrap();
 
-        let err = ETagCache::load_with_mode(&cache_path, HashMode::Ntlm)
+        let err = ETagCache::load(&cache_path, HashMode::Ntlm, true)
             .await
             .unwrap_err();
 
@@ -176,5 +183,23 @@ mod tests {
         } else {
             panic!("Expected ModeMismatch error");
         }
+    }
+
+    #[tokio::test]
+    async fn load_ignores_mode_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir.path().join(".etag_cache.json");
+        let cache = json!({
+            "etags": { "ABCDE": "\"etag\"" },
+            "mode": HashMode::Sha1
+        });
+        fs::write(&cache_path, cache.to_string()).await.unwrap();
+
+        let cache = ETagCache::load(&cache_path, HashMode::Ntlm, false)
+            .await
+            .unwrap();
+
+        assert_eq!(cache.mode, HashMode::Ntlm);
+        assert!(cache.etags.is_empty());
     }
 }
