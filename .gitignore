@@ -1,3 +1,5 @@
 target/
 Cargo.lock
 .jj/
+[0-9A-F]*
+.etag_cache.json
