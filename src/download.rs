@@ -27,6 +27,9 @@ use tokio_util::io::StreamReader;
 
 use crate::args::{Args, HashMode};
 
+// Maximum number of seconds we will sleep on retry.
+const MAX_BACKOFF_SECS: u64 = 60;
+
 #[derive(Error, Debug)]
 pub enum DownloadError {
     #[error("{operation} operation on {path} failed: {source}")]
@@ -239,7 +242,7 @@ pub async fn download_hash(
         }
 
         if retry < args.max_retries - 1 {
-            let delay = 2u64.saturating_pow(retry as u32);
+            let delay = 2u64.saturating_pow(retry as u32).min(MAX_BACKOFF_SECS);
             let jitter = rand::random_range(delay / 2..=delay).max(1);
             sleep(Duration::from_secs(jitter)).await;
         }
