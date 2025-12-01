@@ -76,16 +76,13 @@ impl From<InternalDownloadError> for DownloadError {
 
 struct TempFileGuard<'a> {
     path: &'a Path,
-    cleanup: bool,
+    delete_on_drop: bool,
 }
 
 impl Drop for TempFileGuard<'_> {
     fn drop(&mut self) {
-        if self.cleanup {
-            let path = self.path.to_path_buf();
-            tokio::spawn(async move {
-                let _ = tokio::fs::remove_file(path).await;
-            });
+        if self.delete_on_drop {
+            let _ = std::fs::remove_file(self.path);
         }
     }
 }
@@ -95,11 +92,6 @@ async fn write_hash_to_file(
     final_path: &Path,
 ) -> Result<(), InternalDownloadError> {
     let part_path = final_path.with_extension("part");
-    let mut guard = TempFileGuard {
-        path: part_path.as_path(),
-        cleanup: true,
-    };
-
     let mut file = fs::File::create(&part_path).await.map_err(|source| {
         InternalDownloadError::Fatal(DownloadError::FileOperation {
             operation: "create",
@@ -107,6 +99,11 @@ async fn write_hash_to_file(
             source,
         })
     })?;
+
+    let mut guard = TempFileGuard {
+        path: part_path.as_path(),
+        delete_on_drop: true,
+    };
 
     let stream = response.bytes_stream().map_err(std::io::Error::other);
     let mut reader = StreamReader::new(stream);
@@ -135,7 +132,7 @@ async fn write_hash_to_file(
                     }))
                 })
                 .await?;
-            guard.cleanup = false;
+            guard.delete_on_drop = false;
             Ok(())
         }
         Err(err) => {
