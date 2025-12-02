@@ -66,13 +66,20 @@ async fn process_single_hash(
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = try_main().await {
-        tracing::error!("{err}");
-        std::process::exit(1);
+    match try_main().await {
+        Err(err) => {
+            tracing::error!("{err}");
+            std::process::exit(1);
+        }
+        Ok(true) => {
+            // Operation was cancelled
+            std::process::exit(1);
+        }
+        Ok(_) => {}
     }
 }
 
-async fn try_main() -> Result<(), Box<dyn std::error::Error>> {
+async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {pos:>7}/{len:7} ({percent:>3}%) ETA: {eta}",
@@ -157,9 +164,7 @@ async fn try_main() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     // Save ETag cache
-    if let Err(err) = etag_cache.write().await.save().await {
-        tracing::error!("{err}");
-    }
+    etag_cache.write().await.save().await?;
 
-    Ok(())
+    Ok(token.is_cancelled())
 }
