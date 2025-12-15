@@ -2,7 +2,7 @@
 name = "pwned-passwords-downloader-rs"
 authors = ["Federico G. Schwindt <fgsch@lodoss.net>"]
 description = "A tool to download password hashes from Have I Been Pwned"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/fgsch/pwned-passwords-downloader-rs"
