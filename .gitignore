@@ -1,5 +1,5 @@
-target/
-Cargo.lock
+**/target/
 .jj/
-[0-9A-F]*
 .etag_cache.json
+[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]
+*.part
