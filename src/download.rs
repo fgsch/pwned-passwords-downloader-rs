@@ -18,29 +18,23 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use futures::{TryFutureExt as _, TryStreamExt as _};
 use reqwest::{StatusCode, header};
-use std::{error::Error as _, io::ErrorKind, path::Path, sync::Arc, time::Duration};
+use std::{error::Error as _, sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt as _, sync::RwLock, time::sleep};
-use tokio_util::io::StreamReader;
+use tokio::{sync::RwLock, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{Args, HashMode};
 use crate::etag::ETagCache;
+use crate::writer::{HashWriter, WriteError};
 
 // Maximum number of seconds we will sleep on retry.
 const MAX_BACKOFF_SECS: u64 = 60;
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    #[error("{operation} operation on {path} failed: {source}")]
-    FileOperation {
-        operation: &'static str,
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error(transparent)]
+    FileOperation(#[from] WriteError),
     #[error("Downloads for hash {hash} cancelled")]
     Cancelled { hash: String },
     #[error("Client error {status_code} for hash {hash}: not retrying")]
@@ -62,104 +56,14 @@ pub enum DownloadError {
     },
 }
 
-#[derive(Debug)]
-enum InternalDownloadError {
-    Fatal(DownloadError),
-    Retriable(DownloadError),
-}
-
-impl From<InternalDownloadError> for DownloadError {
-    fn from(err: InternalDownloadError) -> Self {
-        match err {
-            InternalDownloadError::Fatal(e) | InternalDownloadError::Retriable(e) => e,
-        }
-    }
-}
-
-struct TempFileGuard<'a> {
-    path: &'a Path,
-    delete_on_drop: bool,
-}
-
-impl Drop for TempFileGuard<'_> {
-    fn drop(&mut self) {
-        if self.delete_on_drop {
-            let _ = std::fs::remove_file(self.path);
-        }
-    }
-}
-
-async fn write_hash_to_file(
-    response: reqwest::Response,
-    final_path: &Path,
-) -> Result<(), InternalDownloadError> {
-    let part_path = final_path.with_extension("part");
-
-    let mut guard = TempFileGuard {
-        path: part_path.as_path(),
-        delete_on_drop: true,
-    };
-
-    // Use blocking creation to ensure the file is created _before_ dropping the
-    // TempFileGuard should we cancel the future.
-    let file = std::fs::File::create(&part_path).map_err(|source| {
-        InternalDownloadError::Fatal(DownloadError::FileOperation {
-            operation: "create",
-            path: part_path.display().to_string(),
-            source,
-        })
-    })?;
-    let mut file = fs::File::from_std(file);
-
-    let stream = response.bytes_stream().map_err(std::io::Error::other);
-    let mut reader = StreamReader::new(stream);
-
-    match tokio::io::copy(&mut reader, &mut file).await {
-        Ok(_) => {
-            let final_path_buf = final_path.to_path_buf();
-            file.shutdown()
-                .and_then(|_| {
-                    let part_path = part_path.clone();
-                    async move {
-                        match fs::remove_file(&final_path_buf).await {
-                            Ok(_) => {}
-                            Err(err) if err.kind() == ErrorKind::NotFound => {}
-                            Err(err) => return Err(err),
-                        }
-                        fs::rename(&part_path, &final_path_buf).await
-                    }
-                })
-                .or_else(|source| async {
-                    Err(InternalDownloadError::Fatal(DownloadError::FileOperation {
-                        operation: "rename",
-                        path: part_path.display().to_string(),
-                        source,
-                    }))
-                })
-                .await?;
-            guard.delete_on_drop = false;
-            Ok(())
-        }
-        Err(err) => Err(InternalDownloadError::Retriable(
-            DownloadError::FileOperation {
-                operation: "read/write",
-                path: final_path.display().to_string(),
-                source: err,
-            },
-        )),
-    }
-}
-
 pub async fn download_hash(
     client: reqwest::Client,
     args: &Args,
     base_url: &str,
     hash: &str,
     etag: Option<&str>,
+    writer: &dyn HashWriter,
 ) -> Result<Option<String>, DownloadError> {
-    let ext = args.compression.as_str();
-    let final_path = args.output_directory.join(hash).with_extension(ext);
-
     for retry in 0..args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
 
@@ -182,16 +86,13 @@ pub async fn download_hash(
                             .and_then(|s| s.to_str().ok())
                             .map(String::from);
 
-                        match write_hash_to_file(response, &final_path).await {
+                        match writer.write_response(hash, response).await {
                             Ok(_) => {
                                 return Ok(etag);
                             }
-                            Err(InternalDownloadError::Fatal(err)) => {
-                                return Err(err);
-                            }
-                            Err(InternalDownloadError::Retriable(err)) => {
-                                if retry == args.max_retries - 1 {
-                                    return Err(err);
+                            Err(err) => {
+                                if retry == args.max_retries - 1 || !err.is_retriable() {
+                                    return Err(DownloadError::FileOperation(err));
                                 }
                             }
                         }
@@ -249,18 +150,16 @@ pub async fn process_single_hash(
     hash: String,
     etag_cache: Arc<RwLock<ETagCache>>,
     token: CancellationToken,
+    writer: Arc<dyn HashWriter>,
 ) -> (String, Result<Option<String>, DownloadError>) {
-    let ext = args.compression.as_str();
-    let final_path = args.output_directory.join(&hash).with_extension(ext);
-    let etag = if args.incremental
-        && (args.ignore_missing_hash_file || fs::try_exists(&final_path).await.unwrap_or(false))
-    {
-        etag_cache.read().await.etags.get(&hash).cloned()
-    } else {
-        None
-    };
+    let etag =
+        if args.incremental && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await) {
+            etag_cache.read().await.etags.get(&hash).cloned()
+        } else {
+            None
+        };
     let result = tokio::select! {
-        res = download_hash(client, &args, base_url, &hash, etag.as_deref()) => res,
+        res = download_hash(client, &args, base_url, &hash, etag.as_deref(), writer.as_ref()) => res,
         _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
     };
     (hash, result)
@@ -269,7 +168,10 @@ pub async fn process_single_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{CompressionFormat, HashMode, create_test_args};
+    use crate::{
+        args::{CompressionFormat, HashMode, create_test_args},
+        writer::create_test_writer,
+    };
     use mockito::{Matcher, Server};
     use tempfile::TempDir;
     use tokio::fs;
@@ -279,6 +181,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -292,7 +195,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "AAAAA", None).await;
+        let result = download_hash(client, &args, &base_url, "AAAAA", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -313,6 +216,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.hash_mode = HashMode::Ntlm;
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -325,7 +229,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "HHHHH", None).await;
+        let result = download_hash(client, &args, &base_url, "HHHHH", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -338,6 +242,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.incremental = true;
+        let writer = create_test_writer(&args);
 
         let file_path = temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
@@ -352,8 +257,15 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result =
-            download_hash(client, &args, &base_url, "BBBBB", Some("\"existing-etag\"")).await;
+        let result = download_hash(
+            client,
+            &args,
+            &base_url,
+            "BBBBB",
+            Some("\"existing-etag\""),
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -369,6 +281,7 @@ mod tests {
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.incremental = true;
         args.ignore_missing_hash_file = true;
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -380,8 +293,15 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result =
-            download_hash(client, &args, &base_url, "GGGGG", Some("\"cached-etag\"")).await;
+        let result = download_hash(
+            client,
+            &args,
+            &base_url,
+            "GGGGG",
+            Some("\"cached-etag\""),
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -394,6 +314,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let temp_dir = TempDir::new().unwrap();
         let args = create_test_args(temp_dir.path().to_path_buf());
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -404,7 +325,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "CCCCC", None).await;
+        let result = download_hash(client, &args, &base_url, "CCCCC", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -424,6 +345,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.max_retries = 5;
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -435,7 +357,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "DDDDD", None).await;
+        let result = download_hash(client, &args, &base_url, "DDDDD", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -461,6 +383,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.compression = CompressionFormat::Gzip;
+        let writer = create_test_writer(&args);
 
         let client = reqwest::Client::new();
 
@@ -474,7 +397,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "EEEEE", None).await;
+        let result = download_hash(client, &args, &base_url, "EEEEE", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -485,27 +408,5 @@ mod tests {
 
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, mock_data);
-    }
-
-    #[tokio::test]
-    async fn write_hash_to_file_success() {
-        let temp_dir = TempDir::new().unwrap();
-        let final_path = temp_dir.path().join("FFFFF");
-
-        let mock_body = "test content";
-        let response = reqwest::Response::from(
-            http::Response::builder()
-                .status(200)
-                .body(mock_body)
-                .unwrap(),
-        );
-
-        let result = write_hash_to_file(response, &final_path).await;
-
-        assert!(result.is_ok());
-        assert!(final_path.exists());
-
-        let content = fs::read_to_string(&final_path).await.unwrap();
-        assert_eq!(content, mock_body);
     }
 }

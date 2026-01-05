@@ -12,6 +12,7 @@ keywords = ["security", "passwords", "hibp", "downloader"]
 categories = ["command-line-utilities", "web-programming::http-client"]
 
 [dependencies]
+async-trait = "0.1.89"
 clap = { version = "4.5.54", features = ["derive"] }
 futures = "0.3.31"
 indicatif = "0.18.3"

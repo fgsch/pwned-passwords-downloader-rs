@@ -21,6 +21,7 @@
 mod args;
 mod download;
 mod etag;
+mod writer;
 
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
@@ -36,6 +37,7 @@ use tracing_subscriber::{
 use args::parse_args;
 use download::{DownloadError, process_single_hash};
 use etag::ETagCache;
+use writer::{HashFileWriter, HashWriter};
 
 const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
 // HIBP API base URL.
@@ -105,6 +107,10 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     let args = Arc::new(args);
+    let writer: Arc<dyn HashWriter> = Arc::new(HashFileWriter::new(
+        args.output_directory.clone(),
+        args.compression.as_str().to_string(),
+    ));
 
     futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
@@ -113,9 +119,10 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
             let etag_cache = etag_cache.clone();
             let hash = format!("{hash:05X}");
             let args = args.clone();
+            let writer = writer.clone();
             let token = token.clone();
 
-            process_single_hash(client, args, HIBP_BASE_URL, hash, etag_cache, token)
+            process_single_hash(client, args, HIBP_BASE_URL, hash, etag_cache, token, writer)
         })
         .buffer_unordered(args.max_concurrent_requests)
         .for_each(|(hash, result)| {
