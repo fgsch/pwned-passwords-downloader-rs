@@ -92,18 +92,22 @@ async fn write_hash_to_file(
     final_path: &Path,
 ) -> Result<(), InternalDownloadError> {
     let part_path = final_path.with_extension("part");
-    let mut file = fs::File::create(&part_path).await.map_err(|source| {
+
+    let mut guard = TempFileGuard {
+        path: part_path.as_path(),
+        delete_on_drop: true,
+    };
+
+    // Use blocking creation to ensure the file is created _before_ dropping the
+    // TempFileGuard should we cancel the future.
+    let file = std::fs::File::create(&part_path).map_err(|source| {
         InternalDownloadError::Fatal(DownloadError::FileOperation {
             operation: "create",
             path: part_path.display().to_string(),
             source,
         })
     })?;
-
-    let mut guard = TempFileGuard {
-        path: part_path.as_path(),
-        delete_on_drop: true,
-    };
+    let mut file = fs::File::from_std(file);
 
     let stream = response.bytes_stream().map_err(std::io::Error::other);
     let mut reader = StreamReader::new(stream);
@@ -124,7 +128,6 @@ async fn write_hash_to_file(
                     }
                 })
                 .or_else(|source| async {
-                    _ = fs::remove_file(&part_path).await;
                     Err(InternalDownloadError::Fatal(DownloadError::FileOperation {
                         operation: "rename",
                         path: part_path.display().to_string(),
@@ -135,16 +138,13 @@ async fn write_hash_to_file(
             guard.delete_on_drop = false;
             Ok(())
         }
-        Err(err) => {
-            _ = fs::remove_file(&part_path).await;
-            Err(InternalDownloadError::Retriable(
-                DownloadError::FileOperation {
-                    operation: "read/write",
-                    path: final_path.display().to_string(),
-                    source: err,
-                },
-            ))
-        }
+        Err(err) => Err(InternalDownloadError::Retriable(
+            DownloadError::FileOperation {
+                operation: "read/write",
+                path: final_path.display().to_string(),
+                source: err,
+            },
+        )),
     }
 }
 
