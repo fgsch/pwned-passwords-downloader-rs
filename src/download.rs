@@ -20,12 +20,14 @@
 
 use futures::{TryFutureExt as _, TryStreamExt as _};
 use reqwest::{StatusCode, header};
-use std::{error::Error as _, io::ErrorKind, path::Path, time::Duration};
+use std::{error::Error as _, io::ErrorKind, path::Path, sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt as _, time::sleep};
+use tokio::{fs, io::AsyncWriteExt as _, sync::RwLock, time::sleep};
 use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
 
 use crate::args::{Args, HashMode};
+use crate::etag::ETagCache;
 
 // Maximum number of seconds we will sleep on retry.
 const MAX_BACKOFF_SECS: u64 = 60;
@@ -149,22 +151,14 @@ async fn write_hash_to_file(
 }
 
 pub async fn download_hash(
-    hash: &str,
     client: reqwest::Client,
-    etag: Option<&str>,
     args: &Args,
     base_url: &str,
+    hash: &str,
+    etag: Option<&str>,
 ) -> Result<Option<String>, DownloadError> {
     let ext = args.compression.as_str();
     let final_path = args.output_directory.join(hash).with_extension(ext);
-    let etag_value = if let Some(etag) = etag
-        && args.incremental
-        && (args.ignore_missing_hash_file || fs::try_exists(&final_path).await.unwrap_or(false))
-    {
-        etag
-    } else {
-        ""
-    };
 
     for retry in 0..args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
@@ -173,8 +167,8 @@ pub async fn download_hash(
             request = request.query(&[("mode", "ntlm")]);
         }
 
-        if !etag_value.is_empty() {
-            request = request.header(header::IF_NONE_MATCH, etag_value);
+        if let Some(etag) = etag {
+            request = request.header(header::IF_NONE_MATCH, etag);
         }
 
         match request.send().await {
@@ -202,7 +196,7 @@ pub async fn download_hash(
                             }
                         }
                     }
-                    StatusCode::NOT_MODIFIED if !etag_value.is_empty() => {
+                    StatusCode::NOT_MODIFIED if etag.is_some() => {
                         return Ok(None);
                     }
                     status_code
@@ -248,6 +242,30 @@ pub async fn download_hash(
     unreachable!()
 }
 
+pub async fn process_single_hash(
+    client: reqwest::Client,
+    args: Arc<Args>,
+    base_url: &str,
+    hash: String,
+    etag_cache: Arc<RwLock<ETagCache>>,
+    token: CancellationToken,
+) -> (String, Result<Option<String>, DownloadError>) {
+    let ext = args.compression.as_str();
+    let final_path = args.output_directory.join(&hash).with_extension(ext);
+    let etag = if args.incremental
+        && (args.ignore_missing_hash_file || fs::try_exists(&final_path).await.unwrap_or(false))
+    {
+        etag_cache.read().await.etags.get(&hash).cloned()
+    } else {
+        None
+    };
+    let result = tokio::select! {
+        res = download_hash(client, &args, base_url, &hash, etag.as_deref()) => res,
+        _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
+    };
+    (hash, result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +292,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash("AAAAA", client, None, &args, &base_url).await;
+        let result = download_hash(client, &args, &base_url, "AAAAA", None).await;
 
         mock.assert_async().await;
 
@@ -307,7 +325,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash("HHHHH", client, None, &args, &base_url).await;
+        let result = download_hash(client, &args, &base_url, "HHHHH", None).await;
 
         mock.assert_async().await;
 
@@ -335,7 +353,7 @@ mod tests {
         let base_url = format!("{}/range/", server.url());
 
         let result =
-            download_hash("BBBBB", client, Some("\"existing-etag\""), &args, &base_url).await;
+            download_hash(client, &args, &base_url, "BBBBB", Some("\"existing-etag\"")).await;
 
         mock.assert_async().await;
 
@@ -363,7 +381,7 @@ mod tests {
         let base_url = format!("{}/range/", server.url());
 
         let result =
-            download_hash("GGGGG", client, Some("\"cached-etag\""), &args, &base_url).await;
+            download_hash(client, &args, &base_url, "GGGGG", Some("\"cached-etag\"")).await;
 
         mock.assert_async().await;
 
@@ -386,7 +404,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash("CCCCC", client, None, &args, &base_url).await;
+        let result = download_hash(client, &args, &base_url, "CCCCC", None).await;
 
         mock.assert_async().await;
 
@@ -417,7 +435,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash("DDDDD", client, None, &args, &base_url).await;
+        let result = download_hash(client, &args, &base_url, "DDDDD", None).await;
 
         mock.assert_async().await;
 
@@ -456,7 +474,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash("EEEEE", client, None, &args, &base_url).await;
+        let result = download_hash(client, &args, &base_url, "EEEEE", None).await;
 
         mock.assert_async().await;
 
