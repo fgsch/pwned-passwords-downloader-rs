@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Federico G. Schwindt <fgsch@lodoss.net>
+// Copyright (c) 2024-2026 Federico G. Schwindt <fgsch@lodoss.net>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,14 +33,19 @@ const MAX_BACKOFF_SECS: u64 = 60;
 
 #[derive(Error, Debug)]
 pub enum DownloadError {
-    #[error(transparent)]
-    FileOperation(#[from] WriteError),
+    #[error("File operation failed after {retries} retries: {source}")]
+    FileOperation {
+        retries: usize,
+        #[source]
+        source: WriteError,
+    },
     #[error("Downloads for hash {hash} cancelled")]
     Cancelled { hash: String },
-    #[error("Client error {status_code} for hash {hash}: not retrying")]
+    #[error("Client error {status_code} for hash {hash} after {retries} retries: not retrying")]
     Client {
         hash: String,
         status_code: StatusCode,
+        retries: usize,
     },
     #[error("HTTP error {status_code} for hash {hash}: failed after {retries} retries")]
     Http {
@@ -56,6 +61,12 @@ pub enum DownloadError {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOutcome {
+    pub etag: Option<String>,
+    pub retries_used: u64,
+}
+
 pub async fn download_hash(
     client: reqwest::Client,
     args: &Args,
@@ -63,7 +74,7 @@ pub async fn download_hash(
     hash: &str,
     etag: Option<&str>,
     writer: &dyn HashWriter,
-) -> Result<Option<String>, DownloadError> {
+) -> Result<DownloadOutcome, DownloadError> {
     for retry in 0..args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
 
@@ -88,17 +99,26 @@ pub async fn download_hash(
 
                         match writer.write_response(hash, response).await {
                             Ok(_) => {
-                                return Ok(etag);
+                                return Ok(DownloadOutcome {
+                                    etag,
+                                    retries_used: retry as u64,
+                                });
                             }
                             Err(err) => {
                                 if retry == args.max_retries - 1 || !err.is_retriable() {
-                                    return Err(DownloadError::FileOperation(err));
+                                    return Err(DownloadError::FileOperation {
+                                        retries: retry,
+                                        source: err,
+                                    });
                                 }
                             }
                         }
                     }
                     StatusCode::NOT_MODIFIED if etag.is_some() => {
-                        return Ok(None);
+                        return Ok(DownloadOutcome {
+                            etag: None,
+                            retries_used: retry as u64,
+                        });
                     }
                     status_code
                         if status_code.is_client_error()
@@ -107,6 +127,7 @@ pub async fn download_hash(
                         return Err(DownloadError::Client {
                             hash: hash.to_string(),
                             status_code,
+                            retries: retry,
                         });
                     }
                     status_code => {
@@ -114,7 +135,7 @@ pub async fn download_hash(
                             return Err(DownloadError::Http {
                                 hash: hash.to_string(),
                                 status_code,
-                                retries: args.max_retries,
+                                retries: retry,
                             });
                         }
                     }
@@ -127,7 +148,7 @@ pub async fn download_hash(
                         error: err
                             .source()
                             .map_or_else(|| err.to_string(), |e| e.to_string()),
-                        retries: args.max_retries,
+                        retries: retry,
                     });
                 }
             }
@@ -151,7 +172,7 @@ pub async fn process_single_hash(
     etag_cache: Arc<RwLock<ETagCache>>,
     token: CancellationToken,
     writer: Arc<dyn HashWriter>,
-) -> (String, Result<Option<String>, DownloadError>) {
+) -> (String, Result<DownloadOutcome, DownloadError>) {
     let etag =
         if args.incremental && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await) {
             etag_cache.read().await.etags.get(&hash).cloned()
@@ -200,8 +221,14 @@ mod tests {
         mock.assert_async().await;
 
         assert!(result.is_ok());
-        let etag = result.unwrap();
-        assert_eq!(etag, Some("\"test-etag\"".to_string()));
+        let outcome = result.unwrap();
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                etag: Some("\"test-etag\"".to_string()),
+                retries_used: 0
+            }
+        );
 
         let file_path = temp_dir.path().join("AAAAA");
         assert!(file_path.exists());
@@ -270,8 +297,14 @@ mod tests {
         mock.assert_async().await;
 
         assert!(result.is_ok());
-        let etag = result.unwrap();
-        assert_eq!(etag, None);
+        let outcome = result.unwrap();
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                etag: None,
+                retries_used: 0
+            }
+        );
     }
 
     #[tokio::test]
@@ -306,7 +339,14 @@ mod tests {
         mock.assert_async().await;
 
         assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        let outcome = result.unwrap();
+        assert_eq!(
+            outcome,
+            DownloadOutcome {
+                etag: None,
+                retries_used: 0
+            }
+        );
     }
 
     #[tokio::test]
@@ -333,10 +373,46 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(err, DownloadError::Client { .. }));
 
-        if let DownloadError::Client { hash, status_code } = err {
+        if let DownloadError::Client {
+            hash,
+            status_code,
+            retries,
+        } = err
+        {
             assert_eq!(hash, "CCCCC");
             assert_eq!(status_code, StatusCode::NOT_FOUND);
+            assert_eq!(retries, 0);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_hash_client_error_after_retry_reports_retry_count() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 3;
+        let writer = create_test_writer(&args);
+
+        let client = reqwest::Client::new();
+
+        let _server_error = server
+            .mock("GET", "/range/JJJJJ")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let _client_error = server
+            .mock("GET", "/range/JJJJJ")
+            .with_status(404)
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let err = download_hash(client, &args, &base_url, "JJJJJ", None, &writer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DownloadError::Client { retries: 1, .. }));
     }
 
     #[tokio::test(start_paused = true)]
@@ -373,8 +449,41 @@ mod tests {
         {
             assert_eq!(hash, "DDDDD");
             assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(retries, 5);
+            assert_eq!(retries, 4);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_hash_reports_retry_count_on_eventual_success() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 3;
+        let writer = create_test_writer(&args);
+
+        let client = reqwest::Client::new();
+
+        let _fail = server
+            .mock("GET", "/range/IIIII")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let _ok = server
+            .mock("GET", "/range/IIIII")
+            .with_status(200)
+            .with_header("etag", "\"ok-etag\"")
+            .with_body("ok")
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let result = download_hash(client, &args, &base_url, "IIIII", None, &writer).await;
+        let outcome = result.unwrap();
+
+        assert_eq!(outcome.retries_used, 1);
+        assert_eq!(outcome.etag, Some("\"ok-etag\"".to_string()));
     }
 
     #[tokio::test]

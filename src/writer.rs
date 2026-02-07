@@ -134,7 +134,7 @@ impl HashWriter for HashFileWriter {
 
         match tokio::io::copy(&mut reader, &mut file).await {
             Ok(_) => {
-                let final_path_buf = final_path.to_path_buf();
+                let final_path_buf = final_path.clone();
                 file.shutdown()
                     .and_then(|_| {
                         let part_path = part_path.clone();

@@ -17,6 +17,7 @@ and multiple compression formats.
 - **Compression support**: Save storage space with Brotli, Gzip, or no compression
 - **Hash mode support**: Download SHA-1 (default) or NTLM hash ranges
 - **Progress tracking**: Visual progress bar with ETA
+- **Run statistics**: Final summary of processed/downloaded/unchanged/cancelled/error/retry counts and average end-to-end time per processed hash
 - **Retry mechanism**: Configurable retry attempts for failed requests
 
 ## Installation
@@ -48,7 +49,7 @@ pwned-passwords-downloader-rs --output-directory pwned-passwords --compression b
 # Use more concurrent requests for faster downloads
 pwned-passwords-downloader-rs --max-concurrent-requests 100
 
-# Quiet mode (no progress bar)
+# Quiet mode (no progress bar and no final statistics summary)
 pwned-passwords-downloader-rs --quiet
 
 # Force a full download

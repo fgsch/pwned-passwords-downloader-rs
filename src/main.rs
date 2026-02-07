@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Federico G. Schwindt <fgsch@lodoss.net>
+// Copyright (c) 2024-2026 Federico G. Schwindt <fgsch@lodoss.net>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,6 +21,7 @@
 mod args;
 mod download;
 mod etag;
+mod stats;
 mod writer;
 
 use futures::StreamExt as _;
@@ -37,6 +38,7 @@ use tracing_subscriber::{
 use args::parse_args;
 use download::{DownloadError, process_single_hash};
 use etag::ETagCache;
+use stats::RunStats;
 use writer::{HashFileWriter, HashWriter};
 
 const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
@@ -111,6 +113,7 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         args.output_directory.clone(),
         args.compression.as_str().to_string(),
     ));
+    let stats = Arc::new(RunStats::new(HASH_MAX + 1));
 
     futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
@@ -128,18 +131,34 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         .for_each(|(hash, result)| {
             span.pb_inc(1);
             let etag_cache = etag_cache.clone();
+            let stats = stats.clone();
             async move {
                 match result {
-                    Ok(Some(etag)) => {
-                        etag_cache.write().await.etags.insert(hash, etag);
-                    }
-                    Ok(None) => {
-                        // File was not modified (304 response)
+                    Ok(outcome) => {
+                        stats.record_retries(outcome.retries_used);
+                        if let Some(etag) = outcome.etag {
+                            stats.record_downloaded();
+                            etag_cache.write().await.etags.insert(hash, etag);
+                        } else {
+                            stats.record_not_modified();
+                            // File was not modified (304 response)
+                        }
                     }
                     Err(DownloadError::Cancelled { .. }) => {
+                        stats.record_cancelled();
                         // Exit quickly
                     }
                     Err(err) => {
+                        if let Some(retries_used) = match &err {
+                            DownloadError::Client { retries, .. }
+                            | DownloadError::FileOperation { retries, .. }
+                            | DownloadError::Http { retries, .. }
+                            | DownloadError::Network { retries, .. } => Some(*retries as u64),
+                            DownloadError::Cancelled { .. } => None,
+                        } {
+                            stats.record_retries(retries_used);
+                        }
+                        stats.record_error(&err);
                         tracing::error!("{err}");
                         // Remove etag on error to force re-download next time
                         etag_cache.write().await.etags.remove(&hash);
@@ -149,8 +168,14 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         })
         .await;
 
+    let cancelled = token.is_cancelled();
+
     // Save ETag cache
     etag_cache.write().await.save().await?;
 
-    Ok(token.is_cancelled())
+    if !args.quiet {
+        stats.log_summary(cancelled);
+    }
+
+    Ok(cancelled)
 }
