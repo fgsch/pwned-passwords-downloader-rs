@@ -225,7 +225,10 @@ async fn process_hashes(
                 stats.record_error(&err);
                 tracing::error!("{err}");
                 // Remove etag on error to force re-download next time
-                etag_deltas.removals.insert(hash);
+                // Remove ETag only when local file state may be inconsistent.
+                if matches!(err, DownloadError::FileOperation { .. }) {
+                    etag_deltas.removals.insert(hash);
+                }
             }
         }
     }
