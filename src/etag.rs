@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Federico G. Schwindt <fgsch@lodoss.net>
+// Copyright (c) 2024-2026 Federico G. Schwindt <fgsch@lodoss.net>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,8 +20,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use thiserror::Error;
 use tokio::fs;
@@ -67,6 +68,12 @@ pub struct ETagCache {
     pub mode: HashMode,
     #[serde(skip)]
     pub path: PathBuf,
+}
+
+#[derive(Default)]
+pub struct ETagDeltas {
+    pub updates: HashMap<String, String>,
+    pub removals: HashSet<String>,
 }
 
 impl ETagCache {
@@ -119,6 +126,22 @@ impl ETagCache {
                 source,
             })?;
         Ok(())
+    }
+
+    pub fn apply_deltas(
+        &mut self,
+        cached_etags: Arc<HashMap<String, String>>,
+        etag_deltas: ETagDeltas,
+    ) {
+        let mut final_etags = match Arc::try_unwrap(cached_etags) {
+            Ok(etags) => etags,
+            Err(shared) => (*shared).clone(),
+        };
+        final_etags.extend(etag_deltas.updates);
+        for hash in etag_deltas.removals {
+            final_etags.remove(&hash);
+        }
+        self.etags = final_etags;
     }
 }
 

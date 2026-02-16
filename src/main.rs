@@ -26,10 +26,7 @@ mod writer;
 
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
@@ -42,7 +39,7 @@ use tracing_subscriber::{
 
 use args::{Args, parse_args};
 use download::{DownloadError, process_single_hash};
-use etag::ETagCache;
+use etag::{ETagCache, ETagDeltas};
 use stats::RunStats;
 use writer::{HashFileWriter, HashWriter};
 
@@ -106,7 +103,7 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
 
     let cancelled = token.is_cancelled();
 
-    merge_etag_cache(&mut etag_cache, cached_etags, etag_deltas);
+    etag_cache.apply_deltas(cached_etags, etag_deltas);
 
     // Save ETag cache
     etag_cache.save().await?;
@@ -160,12 +157,6 @@ fn spawn_ctrl_c_handler() -> CancellationToken {
         }
     });
     token
-}
-
-#[derive(Default)]
-struct ETagDeltas {
-    updates: HashMap<String, String>,
-    removals: HashSet<String>,
 }
 
 async fn process_hashes(
@@ -243,20 +234,4 @@ async fn process_hashes(
     }
 
     etag_deltas
-}
-
-fn merge_etag_cache(
-    etag_cache: &mut ETagCache,
-    cached_etags: Arc<HashMap<String, String>>,
-    etag_deltas: ETagDeltas,
-) {
-    let mut final_etags = match Arc::try_unwrap(cached_etags) {
-        Ok(etags) => etags,
-        Err(shared) => (*shared).clone(),
-    };
-    final_etags.extend(etag_deltas.updates);
-    for hash in etag_deltas.removals {
-        final_etags.remove(&hash);
-    }
-    etag_cache.etags = final_etags;
 }
