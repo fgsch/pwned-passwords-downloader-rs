@@ -18,9 +18,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -62,20 +62,11 @@ pub enum CacheError {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ETagCache {
-    #[serde(serialize_with = "ordered_map")]
     pub etags: HashMap<String, String>,
     #[serde(default = "HashMode::default")]
     pub mode: HashMode,
     #[serde(skip)]
     pub path: PathBuf,
-}
-
-fn ordered_map<S: Serializer>(
-    value: &HashMap<String, String>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    let ordered: BTreeMap<_, _> = value.iter().collect();
-    ordered.serialize(serializer)
 }
 
 impl ETagCache {
@@ -120,7 +111,7 @@ impl ETagCache {
     }
 
     pub async fn save(&self) -> Result<(), CacheError> {
-        let content = serde_json::to_string_pretty(self)?;
+        let content = serialize_compact_diffable(self)?;
         fs::write(&self.path, content)
             .await
             .map_err(|source| CacheError::Write {
@@ -129,6 +120,33 @@ impl ETagCache {
             })?;
         Ok(())
     }
+}
+
+fn serialize_compact_diffable(cache: &ETagCache) -> Result<String, serde_json::Error> {
+    let mut content = String::from("{\"etags\":{");
+    let mut entries: Vec<_> = cache.etags.iter().collect();
+    entries.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+    for (idx, (key, value)) in entries.into_iter().enumerate() {
+        if idx == 0 {
+            content.push('\n');
+        } else {
+            content.push_str(",\n");
+        }
+        content.push_str(&serde_json::to_string(key)?);
+        content.push(':');
+        content.push_str(&serde_json::to_string(value)?);
+    }
+
+    if !cache.etags.is_empty() {
+        content.push('\n');
+    }
+
+    content.push_str("},\"mode\":");
+    content.push_str(&serde_json::to_string(&cache.mode)?);
+    content.push_str("}\n");
+
+    Ok(content)
 }
 
 #[cfg(test)]
@@ -201,5 +219,32 @@ mod tests {
 
         assert_eq!(cache.mode, HashMode::Ntlm);
         assert!(cache.etags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_writes_compact_sorted_and_diffable_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir.path().join(".etag_cache.json");
+
+        let mut etags = HashMap::new();
+        etags.insert("FFFFF".to_string(), "etag-z".to_string());
+        etags.insert("00000".to_string(), "etag-a".to_string());
+
+        let cache = ETagCache {
+            etags,
+            mode: HashMode::Sha1,
+            path: cache_path.clone(),
+        };
+
+        cache.save().await.unwrap();
+        let content = fs::read_to_string(&cache_path).await.unwrap();
+        let mode = serde_json::to_string(&HashMode::Sha1).unwrap();
+
+        assert_eq!(
+            content,
+            format!(
+                "{{\"etags\":{{\n\"00000\":\"etag-a\",\n\"FFFFF\":\"etag-z\"\n}},\"mode\":{mode}}}\n"
+            )
+        );
     }
 }
