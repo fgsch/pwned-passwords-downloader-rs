@@ -37,7 +37,7 @@ use tracing_subscriber::{
     fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
 };
 
-use args::parse_args;
+use args::{Args, parse_args};
 use download::{DownloadError, process_single_hash};
 use etag::ETagCache;
 use stats::RunStats;
@@ -65,6 +65,57 @@ async fn main() {
 }
 
 async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
+    let span = init_tracing();
+
+    let (args, client) = parse_args()?;
+
+    // Load ETag cache
+    let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
+    let mut etag_cache =
+        ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?;
+    // Keep an immutable snapshot for lock-free read access in workers.
+    let cached_etags = Arc::new(std::mem::take(&mut etag_cache.etags));
+
+    // Handle ctrl-c
+    let token = spawn_ctrl_c_handler();
+
+    if !args.quiet {
+        span.pb_start();
+    }
+
+    let args = Arc::new(args);
+    let writer: Arc<dyn HashWriter> = Arc::new(HashFileWriter::new(
+        args.output_directory.clone(),
+        args.compression.as_str().to_string(),
+    ));
+    let stats = Arc::new(RunStats::new(HASH_MAX + 1));
+
+    let etag_deltas = process_hashes(
+        &span,
+        client,
+        args.clone(),
+        writer,
+        token.clone(),
+        cached_etags.clone(),
+        stats.clone(),
+    )
+    .await;
+
+    let cancelled = token.is_cancelled();
+
+    merge_etag_cache(&mut etag_cache, cached_etags, etag_deltas);
+
+    // Save ETag cache
+    etag_cache.save().await?;
+
+    if !args.quiet {
+        stats.log_summary(cancelled);
+    }
+
+    Ok(cancelled)
+}
+
+fn init_tracing() -> tracing::Span {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {pos:>7}/{len:7} ({percent:>3}%) ETA: {eta}",
@@ -86,17 +137,10 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         .init();
     let span = tracing::info_span!("span");
     span.pb_set_length(HASH_MAX + 1);
+    span
+}
 
-    let (args, client) = parse_args()?;
-
-    // Load ETag cache
-    let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
-    let mut etag_cache =
-        ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?;
-    // Keep an immutable snapshot for lock-free read access in workers.
-    let cached_etags = Arc::new(std::mem::take(&mut etag_cache.etags));
-
-    // Handle ctrl-c
+fn spawn_ctrl_c_handler() -> CancellationToken {
     let token = CancellationToken::new();
     tokio::task::spawn({
         let token = token.clone();
@@ -106,19 +150,25 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
             tracing::info!("Received ctrl-c; terminating.");
         }
     });
+    token
+}
 
-    if !args.quiet {
-        span.pb_start();
-    }
+#[derive(Default)]
+struct ETagDeltas {
+    updates: HashMap<String, String>,
+    removals: HashSet<String>,
+}
 
-    let args = Arc::new(args);
-    let writer: Arc<dyn HashWriter> = Arc::new(HashFileWriter::new(
-        args.output_directory.clone(),
-        args.compression.as_str().to_string(),
-    ));
-    let stats = Arc::new(RunStats::new(HASH_MAX + 1));
-    let mut etag_updates: HashMap<String, String> = HashMap::new();
-    let mut etag_removals: HashSet<String> = HashSet::new();
+async fn process_hashes(
+    span: &tracing::Span,
+    client: reqwest::Client,
+    args: Arc<Args>,
+    writer: Arc<dyn HashWriter>,
+    token: CancellationToken,
+    cached_etags: Arc<HashMap<String, String>>,
+    stats: Arc<RunStats>,
+) -> ETagDeltas {
+    let mut etag_deltas = ETagDeltas::default();
 
     let stream = futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
@@ -145,12 +195,14 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
 
     while let Some((hash, result)) = stream.next().await {
         span.pb_inc(1);
+        let stats = stats.as_ref();
+        let etag_deltas: &mut ETagDeltas = &mut etag_deltas;
         match result {
             Ok(outcome) => {
                 stats.record_retries(outcome.retries_used);
                 if let Some(etag) = outcome.etag {
                     stats.record_downloaded();
-                    etag_updates.insert(hash, etag);
+                    etag_deltas.updates.insert(hash, etag);
                 } else {
                     stats.record_not_modified();
                     // File was not modified (304 response)
@@ -161,11 +213,11 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
                 // Exit quickly
             }
             Err(err) => {
-                if let Some(retries_used) = match &err {
+                if let Some(retries_used) = match err {
                     DownloadError::Client { retries, .. }
                     | DownloadError::FileOperation { retries, .. }
                     | DownloadError::Http { retries, .. }
-                    | DownloadError::Network { retries, .. } => Some(*retries as u64),
+                    | DownloadError::Network { retries, .. } => Some(retries as u64),
                     DownloadError::Cancelled { .. } => None,
                 } {
                     stats.record_retries(retries_used);
@@ -173,26 +225,26 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
                 stats.record_error(&err);
                 tracing::error!("{err}");
                 // Remove etag on error to force re-download next time
-                etag_removals.insert(hash);
+                etag_deltas.removals.insert(hash);
             }
         }
     }
 
-    let cancelled = token.is_cancelled();
+    etag_deltas
+}
 
-    let mut final_etags = (*cached_etags).clone();
-    final_etags.extend(etag_updates);
-    for hash in etag_removals {
+fn merge_etag_cache(
+    etag_cache: &mut ETagCache,
+    cached_etags: Arc<HashMap<String, String>>,
+    etag_deltas: ETagDeltas,
+) {
+    let mut final_etags = match Arc::try_unwrap(cached_etags) {
+        Ok(etags) => etags,
+        Err(shared) => (*shared).clone(),
+    };
+    final_etags.extend(etag_deltas.updates);
+    for hash in etag_deltas.removals {
         final_etags.remove(&hash);
     }
     etag_cache.etags = final_etags;
-
-    // Save ETag cache
-    etag_cache.save().await?;
-
-    if !args.quiet {
-        stats.log_summary(cancelled);
-    }
-
-    Ok(cancelled)
 }
