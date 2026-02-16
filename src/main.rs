@@ -34,7 +34,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
 use tracing_subscriber::{
-    fmt::writer::MakeWriterExt as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+    filter::{LevelFilter, filter_fn},
+    fmt::writer::MakeWriterExt as _,
+    layer::{Layer as _, SubscriberExt as _},
+    util::SubscriberInitExt as _,
 };
 
 use args::{Args, parse_args};
@@ -123,7 +126,13 @@ fn init_tracing() -> tracing::Span {
         .unwrap()
         .progress_chars("#>-"),
     );
+    let app_span_filter = filter_fn(|meta| {
+        // Only create progress bars for spans emitted by this crate.
+        meta.is_span() && meta.target().starts_with(env!("CARGO_CRATE_NAME"))
+    });
+
     tracing_subscriber::registry()
+        .with(LevelFilter::INFO)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(
@@ -133,7 +142,7 @@ fn init_tracing() -> tracing::Span {
                 )
                 .with_target(false),
         )
-        .with(indicatif_layer)
+        .with(indicatif_layer.with_filter(app_span_filter))
         .init();
     let span = tracing::info_span!("span");
     span.pb_set_length(HASH_MAX + 1);
