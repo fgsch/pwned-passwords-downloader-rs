@@ -19,13 +19,12 @@
 // SOFTWARE.
 
 use reqwest::{StatusCode, header};
-use std::{error::Error as _, sync::Arc, time::Duration};
+use std::{collections::HashMap, error::Error as _, sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{sync::RwLock, time::sleep};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{Args, HashMode};
-use crate::etag::ETagCache;
 use crate::writer::{HashWriter, WriteError};
 
 // Maximum number of seconds we will sleep on retry.
@@ -169,13 +168,13 @@ pub async fn process_single_hash(
     args: Arc<Args>,
     base_url: &str,
     hash: String,
-    etag_cache: Arc<RwLock<ETagCache>>,
+    cached_etags: Arc<HashMap<String, String>>,
     token: CancellationToken,
     writer: Arc<dyn HashWriter>,
 ) -> (String, Result<DownloadOutcome, DownloadError>) {
     let etag =
         if args.incremental && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await) {
-            etag_cache.read().await.etags.get(&hash).cloned()
+            cached_etags.get(&hash).cloned()
         } else {
             None
         };

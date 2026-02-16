@@ -26,8 +26,10 @@ mod writer;
 
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
@@ -89,9 +91,10 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
 
     // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
-    let etag_cache = Arc::new(RwLock::new(
-        ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?,
-    ));
+    let mut etag_cache =
+        ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?;
+    // Keep an immutable snapshot for lock-free read access in workers.
+    let cached_etags = Arc::new(std::mem::take(&mut etag_cache.etags));
 
     // Handle ctrl-c
     let token = CancellationToken::new();
@@ -114,64 +117,78 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         args.compression.as_str().to_string(),
     ));
     let stats = Arc::new(RunStats::new(HASH_MAX + 1));
+    let mut etag_updates: HashMap<String, String> = HashMap::new();
+    let mut etag_removals: HashSet<String> = HashSet::new();
 
-    futures::stream::iter(0..=HASH_MAX)
+    let stream = futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
         .map(|hash| {
             let client = client.clone();
-            let etag_cache = etag_cache.clone();
+            let cached_etags = cached_etags.clone();
             let hash = format!("{hash:05X}");
             let args = args.clone();
             let writer = writer.clone();
             let token = token.clone();
 
-            process_single_hash(client, args, HIBP_BASE_URL, hash, etag_cache, token, writer)
+            process_single_hash(
+                client,
+                args,
+                HIBP_BASE_URL,
+                hash,
+                cached_etags,
+                token,
+                writer,
+            )
         })
-        .buffer_unordered(args.max_concurrent_requests)
-        .for_each(|(hash, result)| {
-            span.pb_inc(1);
-            let etag_cache = etag_cache.clone();
-            let stats = stats.clone();
-            async move {
-                match result {
-                    Ok(outcome) => {
-                        stats.record_retries(outcome.retries_used);
-                        if let Some(etag) = outcome.etag {
-                            stats.record_downloaded();
-                            etag_cache.write().await.etags.insert(hash, etag);
-                        } else {
-                            stats.record_not_modified();
-                            // File was not modified (304 response)
-                        }
-                    }
-                    Err(DownloadError::Cancelled { .. }) => {
-                        stats.record_cancelled();
-                        // Exit quickly
-                    }
-                    Err(err) => {
-                        if let Some(retries_used) = match &err {
-                            DownloadError::Client { retries, .. }
-                            | DownloadError::FileOperation { retries, .. }
-                            | DownloadError::Http { retries, .. }
-                            | DownloadError::Network { retries, .. } => Some(*retries as u64),
-                            DownloadError::Cancelled { .. } => None,
-                        } {
-                            stats.record_retries(retries_used);
-                        }
-                        stats.record_error(&err);
-                        tracing::error!("{err}");
-                        // Remove etag on error to force re-download next time
-                        etag_cache.write().await.etags.remove(&hash);
-                    }
+        .buffer_unordered(args.max_concurrent_requests);
+    tokio::pin!(stream);
+
+    while let Some((hash, result)) = stream.next().await {
+        span.pb_inc(1);
+        match result {
+            Ok(outcome) => {
+                stats.record_retries(outcome.retries_used);
+                if let Some(etag) = outcome.etag {
+                    stats.record_downloaded();
+                    etag_updates.insert(hash, etag);
+                } else {
+                    stats.record_not_modified();
+                    // File was not modified (304 response)
                 }
             }
-        })
-        .await;
+            Err(DownloadError::Cancelled { .. }) => {
+                stats.record_cancelled();
+                // Exit quickly
+            }
+            Err(err) => {
+                if let Some(retries_used) = match &err {
+                    DownloadError::Client { retries, .. }
+                    | DownloadError::FileOperation { retries, .. }
+                    | DownloadError::Http { retries, .. }
+                    | DownloadError::Network { retries, .. } => Some(*retries as u64),
+                    DownloadError::Cancelled { .. } => None,
+                } {
+                    stats.record_retries(retries_used);
+                }
+                stats.record_error(&err);
+                tracing::error!("{err}");
+                // Remove etag on error to force re-download next time
+                etag_removals.insert(hash);
+            }
+        }
+    }
 
     let cancelled = token.is_cancelled();
 
+    let mut final_etags = (*cached_etags).clone();
+    final_etags.extend(etag_updates);
+    for hash in etag_removals {
+        final_etags.remove(&hash);
+    }
+    etag_cache.etags = final_etags;
+
     // Save ETag cache
-    etag_cache.write().await.save().await?;
+    etag_cache.save().await?;
 
     if !args.quiet {
         stats.log_summary(cancelled);
