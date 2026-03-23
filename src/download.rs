@@ -74,7 +74,7 @@ pub async fn download_hash(
     etag: Option<&str>,
     writer: &dyn HashWriter,
 ) -> Result<DownloadOutcome, DownloadError> {
-    for retry in 0..args.max_retries {
+    for retry in 0..=args.max_retries {
         let mut request = client.get(format!("{base_url}{hash}"));
 
         if matches!(args.hash_mode, HashMode::Ntlm) {
@@ -104,7 +104,7 @@ pub async fn download_hash(
                                 });
                             }
                             Err(err) => {
-                                if retry == args.max_retries - 1 || !err.is_retriable() {
+                                if retry == args.max_retries || !err.is_retriable() {
                                     return Err(DownloadError::FileOperation {
                                         retries: retry,
                                         source: err,
@@ -130,7 +130,7 @@ pub async fn download_hash(
                         });
                     }
                     status_code => {
-                        if retry == args.max_retries - 1 {
+                        if retry == args.max_retries {
                             return Err(DownloadError::Http {
                                 hash: hash.to_string(),
                                 status_code,
@@ -141,7 +141,7 @@ pub async fn download_hash(
                 }
             }
             Err(err) => {
-                if retry == args.max_retries - 1 {
+                if retry == args.max_retries {
                     return Err(DownloadError::Network {
                         hash: hash.to_string(),
                         error: err
@@ -153,7 +153,7 @@ pub async fn download_hash(
             }
         }
 
-        if retry < args.max_retries - 1 {
+        if retry < args.max_retries {
             let delay = 2u64.saturating_pow(retry as u32).min(MAX_BACKOFF_SECS);
             let jitter = rand::random_range(delay / 2..=delay).max(1);
             sleep(Duration::from_secs(jitter)).await;
@@ -190,11 +190,41 @@ mod tests {
     use super::*;
     use crate::{
         args::{CompressionFormat, HashMode, create_test_args},
-        writer::create_test_writer,
+        writer::{HashWriter, WriteError, create_test_writer},
     };
+    use async_trait::async_trait;
     use mockito::{Matcher, Server};
+    use std::{io, sync::Mutex};
     use tempfile::TempDir;
     use tokio::fs;
+
+    struct FlakyWriteWriter {
+        failures_remaining: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl HashWriter for FlakyWriteWriter {
+        async fn hash_exists(&self, _hash: &str) -> bool {
+            false
+        }
+
+        async fn write_response(
+            &self,
+            _hash: &str,
+            _response: reqwest::Response,
+        ) -> Result<(), WriteError> {
+            let mut failures_remaining = self.failures_remaining.lock().unwrap();
+            if *failures_remaining == 0 {
+                Ok(())
+            } else {
+                *failures_remaining -= 1;
+                Err(WriteError::ReadWrite {
+                    path: "test-path".to_string(),
+                    source: io::Error::other("simulated write failure"),
+                })
+            }
+        }
+    }
 
     #[tokio::test]
     async fn download_hash_success() {
@@ -427,7 +457,7 @@ mod tests {
         let mock = server
             .mock("GET", "/range/DDDDD")
             .with_status(500)
-            .expect(5)
+            .expect(6)
             .create_async()
             .await;
         let base_url = format!("{}/range/", server.url());
@@ -448,8 +478,66 @@ mod tests {
         {
             assert_eq!(hash, "DDDDD");
             assert_eq!(status_code, StatusCode::INTERNAL_SERVER_ERROR);
-            assert_eq!(retries, 4);
+            assert_eq!(retries, 5);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_hash_zero_retries_stops_after_first_http_error() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 0;
+        let writer = create_test_writer(&args);
+
+        let client = reqwest::Client::new();
+
+        let mock = server
+            .mock("GET", "/range/KKKKK")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let err = download_hash(client, &args, &base_url, "KKKKK", None, &writer)
+            .await
+            .unwrap_err();
+
+        mock.assert_async().await;
+        assert!(matches!(err, DownloadError::Http { retries: 0, .. }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn download_hash_zero_retries_stops_after_first_write_error() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 0;
+        let writer = FlakyWriteWriter {
+            failures_remaining: Mutex::new(1),
+        };
+
+        let client = reqwest::Client::new();
+
+        let mock = server
+            .mock("GET", "/range/LLLLL")
+            .with_status(200)
+            .with_body("ok")
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let err = download_hash(client, &args, &base_url, "LLLLL", None, &writer)
+            .await
+            .unwrap_err();
+
+        mock.assert_async().await;
+        assert!(matches!(
+            err,
+            DownloadError::FileOperation { retries: 0, .. }
+        ));
     }
 
     #[tokio::test(start_paused = true)]

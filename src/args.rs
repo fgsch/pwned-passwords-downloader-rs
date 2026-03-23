@@ -99,7 +99,7 @@ pub struct Args {
     pub max_concurrent_requests: usize,
 
     /// Number of retry attempts for failed requests
-    #[arg(long, default_value_t = 5, value_parser = parse_greater_than_zero)]
+    #[arg(long, default_value_t = 5, value_parser)]
     pub max_retries: usize,
 
     /// Directory for storing downloaded hashes
@@ -194,7 +194,7 @@ pub fn create_test_args(output_dir: PathBuf) -> Args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
+    use clap::{Parser, error::ErrorKind};
     use std::time::Duration;
 
     #[test]
@@ -257,5 +257,12 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(error.to_string().contains("Value must be greater than 0"));
+    }
+
+    #[test]
+    fn args_accept_zero_max_retries() {
+        let args = Args::try_parse_from(["test-bin", "--max-retries", "0"]).unwrap();
+
+        assert_eq!(args.max_retries, 0);
     }
 }
