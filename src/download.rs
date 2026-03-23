@@ -62,8 +62,14 @@ pub enum DownloadError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadOutcome {
-    pub etag: Option<String>,
+    pub status: DownloadStatus,
     pub retries_used: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadStatus {
+    Downloaded { etag: Option<String> },
+    NotModified,
 }
 
 pub async fn download_hash(
@@ -99,7 +105,7 @@ pub async fn download_hash(
                         match writer.write_response(hash, response).await {
                             Ok(_) => {
                                 return Ok(DownloadOutcome {
-                                    etag,
+                                    status: DownloadStatus::Downloaded { etag },
                                     retries_used: retry as u64,
                                 });
                             }
@@ -115,7 +121,7 @@ pub async fn download_hash(
                     }
                     StatusCode::NOT_MODIFIED if etag.is_some() => {
                         return Ok(DownloadOutcome {
-                            etag: None,
+                            status: DownloadStatus::NotModified,
                             retries_used: retry as u64,
                         });
                     }
@@ -254,7 +260,9 @@ mod tests {
         assert_eq!(
             outcome,
             DownloadOutcome {
-                etag: Some("\"test-etag\"".to_string()),
+                status: DownloadStatus::Downloaded {
+                    etag: Some("\"test-etag\"".to_string())
+                },
                 retries_used: 0
             }
         );
@@ -289,7 +297,13 @@ mod tests {
 
         mock.assert_async().await;
 
-        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            DownloadOutcome {
+                status: DownloadStatus::Downloaded { etag: None },
+                retries_used: 0
+            }
+        );
     }
 
     #[tokio::test]
@@ -330,7 +344,7 @@ mod tests {
         assert_eq!(
             outcome,
             DownloadOutcome {
-                etag: None,
+                status: DownloadStatus::NotModified,
                 retries_used: 0
             }
         );
@@ -372,7 +386,7 @@ mod tests {
         assert_eq!(
             outcome,
             DownloadOutcome {
-                etag: None,
+                status: DownloadStatus::NotModified,
                 retries_used: 0
             }
         );
@@ -570,7 +584,12 @@ mod tests {
         let outcome = result.unwrap();
 
         assert_eq!(outcome.retries_used, 1);
-        assert_eq!(outcome.etag, Some("\"ok-etag\"".to_string()));
+        assert_eq!(
+            outcome.status,
+            DownloadStatus::Downloaded {
+                etag: Some("\"ok-etag\"".to_string())
+            }
+        );
     }
 
     #[tokio::test]
@@ -600,6 +619,43 @@ mod tests {
         assert!(result.is_ok());
 
         let file_path = temp_dir.path().join("EEEEE.gz");
+        assert!(file_path.exists());
+
+        let content = fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, mock_data);
+    }
+
+    #[tokio::test]
+    async fn download_hash_success_without_etag_is_still_downloaded() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let args = create_test_args(temp_dir.path().to_path_buf());
+        let writer = create_test_writer(&args);
+
+        let client = reqwest::Client::new();
+
+        let mock_data = "body without etag";
+        let mock = server
+            .mock("GET", "/range/MMMMM")
+            .with_status(200)
+            .with_body(mock_data)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let result = download_hash(client, &args, &base_url, "MMMMM", None, &writer).await;
+
+        mock.assert_async().await;
+
+        assert_eq!(
+            result.unwrap(),
+            DownloadOutcome {
+                status: DownloadStatus::Downloaded { etag: None },
+                retries_used: 0
+            }
+        );
+
+        let file_path = temp_dir.path().join("MMMMM");
         assert!(file_path.exists());
 
         let content = fs::read_to_string(&file_path).await.unwrap();

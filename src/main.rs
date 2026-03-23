@@ -38,7 +38,7 @@ use tracing_subscriber::{
 };
 
 use args::{Args, parse_args};
-use download::{DownloadError, process_single_hash};
+use download::{DownloadError, DownloadOutcome, DownloadStatus, process_single_hash};
 use etag::{ETagCache, ETagDeltas};
 use stats::RunStats;
 use writer::{HashFileWriter, HashWriter};
@@ -199,14 +199,7 @@ async fn process_hashes(
         let etag_deltas: &mut ETagDeltas = &mut etag_deltas;
         match result {
             Ok(outcome) => {
-                stats.record_retries(outcome.retries_used);
-                if let Some(etag) = outcome.etag {
-                    stats.record_downloaded();
-                    etag_deltas.updates.insert(hash, etag);
-                } else {
-                    stats.record_not_modified();
-                    // File was not modified (304 response)
-                }
+                apply_download_outcome(hash, outcome, stats, etag_deltas);
             }
             Err(DownloadError::Cancelled { .. }) => {
                 stats.record_cancelled();
@@ -234,4 +227,26 @@ async fn process_hashes(
     }
 
     etag_deltas
+}
+
+fn apply_download_outcome(
+    hash: String,
+    outcome: DownloadOutcome,
+    stats: &RunStats,
+    etag_deltas: &mut ETagDeltas,
+) {
+    stats.record_retries(outcome.retries_used);
+    match outcome.status {
+        DownloadStatus::Downloaded { etag: Some(etag) } => {
+            stats.record_downloaded();
+            etag_deltas.updates.insert(hash, etag);
+        }
+        DownloadStatus::Downloaded { etag: None } => {
+            stats.record_downloaded();
+            etag_deltas.removals.insert(hash);
+        }
+        DownloadStatus::NotModified => {
+            stats.record_not_modified();
+        }
+    }
 }
