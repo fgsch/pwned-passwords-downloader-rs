@@ -38,7 +38,7 @@ use tracing_subscriber::{
 };
 
 use args::{Args, parse_args};
-use download::{DownloadError, DownloadOutcome, DownloadStatus, process_single_hash};
+use download::{DownloadError, DownloadStatus, process_single_hash};
 use etag::{ETagCache, ETagDeltas};
 use stats::RunStats;
 use writer::{HashFileWriter, HashWriter};
@@ -199,7 +199,20 @@ async fn process_hashes(
         let etag_deltas: &mut ETagDeltas = &mut etag_deltas;
         match result {
             Ok(outcome) => {
-                apply_download_outcome(hash, outcome, stats, etag_deltas);
+                stats.record_retries(outcome.retries_used);
+                match outcome.status {
+                    DownloadStatus::Downloaded { etag: Some(etag) } => {
+                        stats.record_downloaded();
+                        etag_deltas.updates.insert(hash, etag);
+                    }
+                    DownloadStatus::Downloaded { etag: None } => {
+                        stats.record_downloaded();
+                        etag_deltas.removals.insert(hash);
+                    }
+                    DownloadStatus::NotModified => {
+                        stats.record_not_modified();
+                    }
+                }
             }
             Err(DownloadError::Cancelled { .. }) => {
                 stats.record_cancelled();
@@ -217,7 +230,6 @@ async fn process_hashes(
                 }
                 stats.record_error(&err);
                 tracing::error!("{err}");
-                // Remove etag on error to force re-download next time
                 // Remove ETag only when local file state may be inconsistent.
                 if matches!(err, DownloadError::FileOperation { .. }) {
                     etag_deltas.removals.insert(hash);
@@ -227,26 +239,4 @@ async fn process_hashes(
     }
 
     etag_deltas
-}
-
-fn apply_download_outcome(
-    hash: String,
-    outcome: DownloadOutcome,
-    stats: &RunStats,
-    etag_deltas: &mut ETagDeltas,
-) {
-    stats.record_retries(outcome.retries_used);
-    match outcome.status {
-        DownloadStatus::Downloaded { etag: Some(etag) } => {
-            stats.record_downloaded();
-            etag_deltas.updates.insert(hash, etag);
-        }
-        DownloadStatus::Downloaded { etag: None } => {
-            stats.record_downloaded();
-            etag_deltas.removals.insert(hash);
-        }
-        DownloadStatus::NotModified => {
-            stats.record_not_modified();
-        }
-    }
 }

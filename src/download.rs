@@ -136,6 +136,8 @@ pub async fn download_hash(
                         });
                     }
                     status_code => {
+                        // We intentionally ignore any Retry-After on 429s and
+                        // keep using the jittered exponential backoff below.
                         if retry == args.max_retries {
                             return Err(DownloadError::Http {
                                 hash: hash.to_string(),
