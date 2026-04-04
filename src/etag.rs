@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use thiserror::Error;
 use tokio::fs;
@@ -128,20 +127,11 @@ impl ETagCache {
         Ok(())
     }
 
-    pub fn apply_deltas(
-        &mut self,
-        cached_etags: Arc<HashMap<String, String>>,
-        etag_deltas: ETagDeltas,
-    ) {
-        let mut final_etags = match Arc::try_unwrap(cached_etags) {
-            Ok(etags) => etags,
-            Err(shared) => (*shared).clone(),
-        };
-        final_etags.extend(etag_deltas.updates);
+    pub fn apply_deltas(&mut self, etag_deltas: ETagDeltas) {
+        self.etags.extend(etag_deltas.updates);
         for hash in etag_deltas.removals {
-            final_etags.remove(&hash);
+            self.etags.remove(&hash);
         }
-        self.etags = final_etags;
     }
 }
 
@@ -269,5 +259,36 @@ mod tests {
                 "{{\"etags\":{{\n\"00000\":\"etag-a\",\n\"FFFFF\":\"etag-z\"\n}},\"mode\":{mode}}}\n"
             )
         );
+    }
+
+    #[test]
+    fn apply_deltas_updates_inserts_and_removes_entries() {
+        let mut etags = HashMap::new();
+        etags.insert("AAAAA".to_string(), "\"etag-a\"".to_string());
+        etags.insert("BBBBB".to_string(), "\"etag-b\"".to_string());
+
+        let mut cache = ETagCache {
+            etags,
+            mode: HashMode::Sha1,
+            path: PathBuf::new(),
+        };
+
+        let mut updates = HashMap::new();
+        updates.insert("AAAAA".to_string(), "\"etag-a-new\"".to_string());
+        updates.insert("CCCCC".to_string(), "\"etag-c\"".to_string());
+
+        let removals = ["BBBBB".to_string()].into_iter().collect();
+
+        cache.apply_deltas(ETagDeltas { updates, removals });
+
+        assert_eq!(
+            cache.etags.get("AAAAA").map(String::as_str),
+            Some("\"etag-a-new\"")
+        );
+        assert_eq!(
+            cache.etags.get("CCCCC").map(String::as_str),
+            Some("\"etag-c\"")
+        );
+        assert!(!cache.etags.contains_key("BBBBB"));
     }
 }

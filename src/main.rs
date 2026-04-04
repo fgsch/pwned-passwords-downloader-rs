@@ -69,14 +69,10 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
 
     let (args, client) = parse_args()?;
 
-    // Load ETag cache
     let etag_cache_path = args.output_directory.join(ETAG_CACHE_FILENAME);
     let mut etag_cache =
         ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?;
-    // Keep an immutable snapshot for lock-free read access in workers.
-    let cached_etags = Arc::new(std::mem::take(&mut etag_cache.etags));
 
-    // Handle ctrl-c
     let token = spawn_ctrl_c_handler();
 
     if !args.quiet {
@@ -96,16 +92,14 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         args.clone(),
         writer,
         token.clone(),
-        cached_etags.clone(),
+        &etag_cache.etags,
         stats.clone(),
     )
     .await;
 
     let cancelled = token.is_cancelled();
 
-    etag_cache.apply_deltas(cached_etags, etag_deltas);
-
-    // Save ETag cache
+    etag_cache.apply_deltas(etag_deltas);
     etag_cache.save().await?;
 
     if !args.quiet {
@@ -165,7 +159,7 @@ async fn process_hashes(
     args: Arc<Args>,
     writer: Arc<dyn HashWriter>,
     token: CancellationToken,
-    cached_etags: Arc<HashMap<String, String>>,
+    cached_etags: &HashMap<String, String>,
     stats: Arc<RunStats>,
 ) -> ETagDeltas {
     let mut etag_deltas = ETagDeltas::default();
@@ -174,7 +168,6 @@ async fn process_hashes(
         .take_until(token.cancelled())
         .map(|hash| {
             let client = client.clone();
-            let cached_etags = cached_etags.clone();
             let hash = format!("{hash:05X}");
             let args = args.clone();
             let writer = writer.clone();

@@ -176,7 +176,7 @@ pub async fn process_single_hash(
     args: Arc<Args>,
     base_url: &str,
     hash: String,
-    cached_etags: Arc<HashMap<String, String>>,
+    cached_etags: &HashMap<String, String>,
     token: CancellationToken,
     writer: Arc<dyn HashWriter>,
 ) -> (String, Result<DownloadOutcome, DownloadError>) {
