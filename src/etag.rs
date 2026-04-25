@@ -138,7 +138,7 @@ impl ETagCache {
 fn serialize_compact_diffable(cache: &ETagCache) -> Result<String, serde_json::Error> {
     let mut content = String::from("{\"etags\":{");
     let mut entries: Vec<_> = cache.etags.iter().collect();
-    entries.sort_unstable_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    entries.sort_unstable_by_key(|(k1, _)| *k1);
 
     for (idx, (key, value)) in entries.into_iter().enumerate() {
         if idx == 0 {
