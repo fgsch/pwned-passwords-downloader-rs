@@ -57,7 +57,7 @@ async fn main() {
             std::process::exit(1);
         }
         Ok(true) => {
-            // Operation was cancelled
+            // Operation was cancelled or had download errors
             std::process::exit(1);
         }
         Ok(_) => {}
@@ -86,7 +86,7 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
     ));
     let stats = Arc::new(RunStats::new(HASH_MAX + 1));
 
-    let etag_deltas = process_hashes(
+    let (etag_deltas, had_errors) = process_hashes(
         &span,
         client,
         args.clone(),
@@ -106,7 +106,7 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         stats.log_summary(cancelled);
     }
 
-    Ok(cancelled)
+    Ok(cancelled || had_errors)
 }
 
 fn init_tracing() -> tracing::Span {
@@ -161,8 +161,9 @@ async fn process_hashes(
     token: CancellationToken,
     cached_etags: &HashMap<String, String>,
     stats: Arc<RunStats>,
-) -> ETagDeltas {
+) -> (ETagDeltas, bool) {
     let mut etag_deltas = ETagDeltas::default();
+    let mut had_errors = false;
 
     let stream = futures::stream::iter(0..=HASH_MAX)
         .take_until(token.cancelled())
@@ -212,6 +213,7 @@ async fn process_hashes(
                 // Exit quickly
             }
             Err(err) => {
+                had_errors = true;
                 if let Some(retries_used) = match err {
                     DownloadError::Client { retries, .. }
                     | DownloadError::FileOperation { retries, .. }
@@ -231,5 +233,5 @@ async fn process_hashes(
         }
     }
 
-    etag_deltas
+    (etag_deltas, had_errors)
 }
