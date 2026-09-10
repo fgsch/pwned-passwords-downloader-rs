@@ -26,7 +26,7 @@ mod writer;
 
 use futures::StreamExt as _;
 use indicatif::ProgressStyle;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, ops::RangeInclusive, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_indicatif::{IndicatifLayer, span_ext::IndicatifSpanExt as _};
@@ -86,15 +86,17 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
     ));
     let stats = Arc::new(RunStats::new(HASH_MAX + 1));
 
-    let (etag_deltas, had_errors) = process_hashes(
-        &span,
+    let (etag_deltas, had_errors) = process_hashes(ProcessInput {
+        span: &span,
         client,
-        args.clone(),
+        args: args.clone(),
         writer,
-        token.clone(),
-        &etag_cache.etags,
-        stats.clone(),
-    )
+        token: token.clone(),
+        cached_etags: &etag_cache.etags,
+        stats: stats.clone(),
+        base_url: HIBP_BASE_URL,
+        hashes: 0..=HASH_MAX,
+    })
     .await;
 
     let cancelled = token.is_cancelled();
@@ -153,19 +155,34 @@ fn spawn_ctrl_c_handler() -> CancellationToken {
     token
 }
 
-async fn process_hashes(
-    span: &tracing::Span,
+struct ProcessInput<'a> {
+    span: &'a tracing::Span,
     client: reqwest::Client,
     args: Arc<Args>,
     writer: Arc<dyn HashWriter>,
     token: CancellationToken,
-    cached_etags: &HashMap<String, String>,
+    cached_etags: &'a HashMap<String, String>,
     stats: Arc<RunStats>,
-) -> (ETagDeltas, bool) {
+    base_url: &'a str,
+    hashes: RangeInclusive<u64>,
+}
+
+async fn process_hashes(input: ProcessInput<'_>) -> (ETagDeltas, bool) {
+    let ProcessInput {
+        span,
+        client,
+        args,
+        writer,
+        token,
+        cached_etags,
+        stats,
+        base_url,
+        hashes,
+    } = input;
     let mut etag_deltas = ETagDeltas::default();
     let mut had_errors = false;
 
-    let stream = futures::stream::iter(0..=HASH_MAX)
+    let stream = futures::stream::iter(hashes)
         .take_until(token.cancelled())
         .map(|hash| {
             let client = client.clone();
@@ -174,15 +191,7 @@ async fn process_hashes(
             let writer = writer.clone();
             let token = token.clone();
 
-            process_single_hash(
-                client,
-                args,
-                HIBP_BASE_URL,
-                hash,
-                cached_etags,
-                token,
-                writer,
-            )
+            process_single_hash(client, args, base_url, hash, cached_etags, token, writer)
         })
         .buffer_unordered(args.max_concurrent_requests);
     tokio::pin!(stream);
@@ -234,4 +243,55 @@ async fn process_hashes(
     }
 
     (etag_deltas, had_errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{args::create_test_args, writer::create_test_writer};
+    use mockito::Server;
+    use std::{collections::HashMap, sync::Arc};
+    use tempfile::TempDir;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn process_hashes_reports_non_cancellation_errors() {
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("GET", "/range/00000")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 0;
+        let args = Arc::new(args);
+        let writer = Arc::new(create_test_writer(args.as_ref()));
+        let token = CancellationToken::new();
+        let cached_etags = HashMap::new();
+        let stats = Arc::new(RunStats::new(1));
+        let span = tracing::info_span!("test");
+        let base_url = format!("{}/range/", server.url());
+
+        let (deltas, had_errors) = process_hashes(ProcessInput {
+            span: &span,
+            client: reqwest::Client::new(),
+            args,
+            writer,
+            token,
+            cached_etags: &cached_etags,
+            stats: stats.clone(),
+            base_url: &base_url,
+            hashes: 0..=0,
+        })
+        .await;
+
+        mock.assert_async().await;
+        assert!(had_errors);
+        assert!(deltas.updates.is_empty());
+        assert!(deltas.removals.is_empty());
+        assert_eq!(stats.snapshot(false).errors_total, 1);
+    }
 }
