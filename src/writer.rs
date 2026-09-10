@@ -19,11 +19,8 @@
 // SOFTWARE.
 
 use async_trait::async_trait;
-use futures::{TryFutureExt as _, TryStreamExt as _};
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
+use futures::TryStreamExt as _;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _};
 use tokio_util::io::StreamReader;
@@ -134,19 +131,13 @@ impl HashWriter for HashFileWriter {
 
         match tokio::io::copy(&mut reader, &mut file).await {
             Ok(_) => {
-                let final_path_buf = final_path.clone();
-                file.shutdown()
-                    .and_then(|_| {
-                        let part_path = part_path.clone();
-                        async move {
-                            match fs::remove_file(&final_path_buf).await {
-                                Ok(_) => {}
-                                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                                Err(err) => return Err(err),
-                            }
-                            fs::rename(&part_path, &final_path_buf).await
-                        }
-                    })
+                file.shutdown().await.map_err(|source| WriteError::Rename {
+                    path: part_path.display().to_string(),
+                    target: final_path.display().to_string(),
+                    source,
+                })?;
+                drop(file);
+                fs::rename(&part_path, &final_path)
                     .await
                     .map_err(|source| WriteError::Rename {
                         path: part_path.display().to_string(),
@@ -201,5 +192,26 @@ mod tests {
 
         let content = fs::read_to_string(&final_path).await.unwrap();
         assert_eq!(content, mock_body);
+    }
+
+    #[tokio::test]
+    async fn write_hash_to_file_replaces_existing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let final_path = temp_dir.path().join("FFFFF");
+        fs::write(&final_path, "old content").await.unwrap();
+        let args = create_test_args(temp_dir.path().to_path_buf());
+        let writer = create_test_writer(&args);
+
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body("new content")
+                .unwrap(),
+        );
+
+        writer.write_response("FFFFF", response).await.unwrap();
+
+        let content = fs::read_to_string(&final_path).await.unwrap();
+        assert_eq!(content, "new content");
     }
 }
