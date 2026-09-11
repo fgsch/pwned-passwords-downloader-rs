@@ -19,7 +19,7 @@
 // SOFTWARE.
 
 use reqwest::{StatusCode, header};
-use std::{collections::HashMap, error::Error as _, sync::Arc, time::Duration};
+use std::{collections::HashMap, error::Error as _, time::Duration};
 use thiserror::Error;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
@@ -73,15 +73,17 @@ pub enum DownloadStatus {
 }
 
 pub async fn download_hash(
-    client: reqwest::Client,
+    client: &reqwest::Client,
     args: &Args,
     base_url: &str,
     hash: &str,
     etag: Option<&str>,
     writer: &dyn HashWriter,
 ) -> Result<DownloadOutcome, DownloadError> {
+    let url = format!("{base_url}{hash}");
+
     for retry in 0..=args.max_retries {
-        let mut request = client.get(format!("{base_url}{hash}"));
+        let mut request = client.get(url.as_str());
 
         if matches!(args.hash_mode, HashMode::Ntlm) {
             request = request.query(&[("mode", "ntlm")]);
@@ -179,27 +181,29 @@ pub async fn download_hash(
 }
 
 pub async fn process_single_hash(
-    client: reqwest::Client,
-    args: Arc<Args>,
+    client: &reqwest::Client,
+    args: &Args,
     base_url: &str,
     hash: String,
     cached_etags: &HashMap<String, String>,
-    token: CancellationToken,
-    writer: Arc<dyn HashWriter>,
+    token: &CancellationToken,
+    writer: &dyn HashWriter,
 ) -> (String, Result<DownloadOutcome, DownloadError>) {
     let etag = if !args.incremental {
         None
-    } else if args.ignore_missing_hash_file {
-        cached_etags.get(&hash).cloned()
-    } else if let Some(etag) = cached_etags.get(&hash).cloned()
-        && writer.hash_exists(&hash).await
-    {
-        Some(etag)
     } else {
-        None
+        let cached_etag = cached_etags.get(&hash);
+
+        if args.ignore_missing_hash_file
+            || (cached_etag.is_some() && writer.hash_exists(&hash).await)
+        {
+            cached_etag.map(String::as_str)
+        } else {
+            None
+        }
     };
     let result = tokio::select! {
-        res = download_hash(client, &args, base_url, &hash, etag.as_deref(), writer.as_ref()) => res,
+        res = download_hash(client, args, base_url, &hash, etag, writer) => res,
         _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
     };
     (hash, result)
@@ -218,7 +222,7 @@ mod tests {
         collections::HashMap,
         io,
         sync::{
-            Arc, Mutex,
+            Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -279,11 +283,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.incremental = true;
-        let args = Arc::new(args);
 
-        let writer = Arc::new(CountingHashWriter {
+        let writer = CountingHashWriter {
             hash_exists_calls: AtomicUsize::new(0),
-        });
+        };
+
+        let client = reqwest::Client::new();
+
         let mock = server
             .mock("GET", "/range/AAAAA")
             .with_status(200)
@@ -294,13 +300,13 @@ mod tests {
         let cached_etags = HashMap::new();
 
         let (hash, result) = process_single_hash(
-            reqwest::Client::new(),
-            args,
+            &client,
+            &args,
             &base_url,
             "AAAAA".to_string(),
             &cached_etags,
-            CancellationToken::new(),
-            writer.clone(),
+            &CancellationToken::new(),
+            &writer,
         )
         .await;
 
@@ -329,7 +335,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "AAAAA", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "AAAAA", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -371,7 +377,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "HHHHH", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "HHHHH", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -392,10 +398,10 @@ mod tests {
         args.incremental = true;
         let writer = create_test_writer(&args);
 
+        let client = reqwest::Client::new();
+
         let file_path = temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
-
-        let client = reqwest::Client::new();
 
         let mock = server
             .mock("GET", "/range/BBBBB")
@@ -406,7 +412,7 @@ mod tests {
         let base_url = format!("{}/range/", server.url());
 
         let result = download_hash(
-            client,
+            &client,
             &args,
             &base_url,
             "BBBBB",
@@ -436,6 +442,8 @@ mod tests {
         args.max_retries = 3;
         let writer = create_test_writer(&args);
 
+        let client = reqwest::Client::new();
+
         let mock = server
             .mock("GET", "/range/CCCCC")
             .with_status(304)
@@ -444,16 +452,9 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let err = download_hash(
-            reqwest::Client::new(),
-            &args,
-            &base_url,
-            "CCCCC",
-            None,
-            &writer,
-        )
-        .await
-        .unwrap_err();
+        let err = download_hash(&client, &args, &base_url, "CCCCC", None, &writer)
+            .await
+            .unwrap_err();
 
         mock.assert_async().await;
 
@@ -487,7 +488,7 @@ mod tests {
         let base_url = format!("{}/range/", server.url());
 
         let result = download_hash(
-            client,
+            &client,
             &args,
             &base_url,
             "GGGGG",
@@ -525,7 +526,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "CCCCC", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "CCCCC", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -569,7 +570,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let err = download_hash(client, &args, &base_url, "JJJJJ", None, &writer)
+        let err = download_hash(&client, &args, &base_url, "JJJJJ", None, &writer)
             .await
             .unwrap_err();
         assert!(matches!(err, DownloadError::Client { retries: 1, .. }));
@@ -593,7 +594,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "DDDDD", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "DDDDD", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -631,7 +632,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let err = download_hash(client, &args, &base_url, "KKKKK", None, &writer)
+        let err = download_hash(&client, &args, &base_url, "KKKKK", None, &writer)
             .await
             .unwrap_err();
 
@@ -660,7 +661,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let err = download_hash(client, &args, &base_url, "LLLLL", None, &writer)
+        let err = download_hash(&client, &args, &base_url, "LLLLL", None, &writer)
             .await
             .unwrap_err();
 
@@ -697,7 +698,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "IIIII", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "IIIII", None, &writer).await;
         let outcome = result.unwrap();
 
         assert_eq!(outcome.retries_used, 1);
@@ -729,7 +730,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "EEEEE", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "EEEEE", None, &writer).await;
 
         mock.assert_async().await;
 
@@ -760,7 +761,7 @@ mod tests {
             .await;
         let base_url = format!("{}/range/", server.url());
 
-        let result = download_hash(client, &args, &base_url, "MMMMM", None, &writer).await;
+        let result = download_hash(&client, &args, &base_url, "MMMMM", None, &writer).await;
 
         mock.assert_async().await;
 

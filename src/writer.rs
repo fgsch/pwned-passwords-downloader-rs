@@ -80,11 +80,11 @@ pub trait HashWriter: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct HashFileWriter {
     output_directory: PathBuf,
-    extension: String,
+    extension: &'static str,
 }
 
 impl HashFileWriter {
-    pub fn new(output_directory: PathBuf, extension: String) -> Self {
+    pub fn new(output_directory: PathBuf, extension: &'static str) -> Self {
         Self {
             output_directory,
             extension,
@@ -94,7 +94,7 @@ impl HashFileWriter {
     fn hash_path(&self, hash: &str) -> PathBuf {
         self.output_directory
             .join(hash)
-            .with_extension(&self.extension)
+            .with_extension(self.extension)
     }
 }
 
@@ -157,10 +157,7 @@ impl HashWriter for HashFileWriter {
 
 #[cfg(test)]
 pub fn create_test_writer(args: &crate::args::Args) -> HashFileWriter {
-    HashFileWriter::new(
-        args.output_directory.clone(),
-        args.compression.as_str().to_string(),
-    )
+    HashFileWriter::new(args.output_directory.clone(), args.compression.as_str())
 }
 
 #[cfg(test)]

@@ -79,19 +79,15 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         span.pb_start();
     }
 
-    let args = Arc::new(args);
-    let writer: Arc<dyn HashWriter> = Arc::new(HashFileWriter::new(
-        args.output_directory.clone(),
-        args.compression.as_str().to_string(),
-    ));
+    let writer = HashFileWriter::new(args.output_directory.clone(), args.compression.as_str());
     let stats = Arc::new(RunStats::new(HASH_MAX + 1));
 
     let (etag_deltas, had_errors) = process_hashes(ProcessInput {
         span: &span,
-        client,
-        args: args.clone(),
-        writer,
-        token: token.clone(),
+        client: &client,
+        args: &args,
+        writer: &writer,
+        token: &token,
         cached_etags: &etag_cache.etags,
         stats: stats.clone(),
         base_url: HIBP_BASE_URL,
@@ -157,10 +153,10 @@ fn spawn_ctrl_c_handler() -> CancellationToken {
 
 struct ProcessInput<'a> {
     span: &'a tracing::Span,
-    client: reqwest::Client,
-    args: Arc<Args>,
-    writer: Arc<dyn HashWriter>,
-    token: CancellationToken,
+    client: &'a reqwest::Client,
+    args: &'a Args,
+    writer: &'a dyn HashWriter,
+    token: &'a CancellationToken,
     cached_etags: &'a HashMap<String, String>,
     stats: Arc<RunStats>,
     base_url: &'a str,
@@ -185,11 +181,7 @@ async fn process_hashes(input: ProcessInput<'_>) -> (ETagDeltas, bool) {
     let stream = futures::stream::iter(hashes)
         .take_until(token.cancelled())
         .map(|hash| {
-            let client = client.clone();
             let hash = format!("{hash:05X}");
-            let args = args.clone();
-            let writer = writer.clone();
-            let token = token.clone();
 
             process_single_hash(client, args, base_url, hash, cached_etags, token, writer)
         })
@@ -199,7 +191,6 @@ async fn process_hashes(input: ProcessInput<'_>) -> (ETagDeltas, bool) {
     while let Some((hash, result)) = stream.next().await {
         span.pb_inc(1);
         let stats = stats.as_ref();
-        let etag_deltas: &mut ETagDeltas = &mut etag_deltas;
         match result {
             Ok(outcome) => {
                 stats.record_retries(outcome.retries_used);
@@ -267,8 +258,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut args = create_test_args(temp_dir.path().to_path_buf());
         args.max_retries = 0;
-        let args = Arc::new(args);
-        let writer = Arc::new(create_test_writer(args.as_ref()));
+        let writer = create_test_writer(&args);
+        let client = reqwest::Client::new();
         let token = CancellationToken::new();
         let cached_etags = HashMap::new();
         let stats = Arc::new(RunStats::new(1));
@@ -277,10 +268,10 @@ mod tests {
 
         let (deltas, had_errors) = process_hashes(ProcessInput {
             span: &span,
-            client: reqwest::Client::new(),
-            args,
-            writer,
-            token,
+            client: &client,
+            args: &args,
+            writer: &writer,
+            token: &token,
             cached_etags: &cached_etags,
             stats: stats.clone(),
             base_url: &base_url,
