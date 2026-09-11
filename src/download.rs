@@ -180,12 +180,17 @@ pub async fn process_single_hash(
     token: CancellationToken,
     writer: Arc<dyn HashWriter>,
 ) -> (String, Result<DownloadOutcome, DownloadError>) {
-    let etag =
-        if args.incremental && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await) {
-            cached_etags.get(&hash).cloned()
-        } else {
-            None
-        };
+    let etag = if !args.incremental {
+        None
+    } else if args.ignore_missing_hash_file {
+        cached_etags.get(&hash).cloned()
+    } else if let Some(etag) = cached_etags.get(&hash).cloned()
+        && writer.hash_exists(&hash).await
+    {
+        Some(etag)
+    } else {
+        None
+    };
     let result = tokio::select! {
         res = download_hash(client, &args, base_url, &hash, etag.as_deref(), writer.as_ref()) => res,
         _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
@@ -202,7 +207,14 @@ mod tests {
     };
     use async_trait::async_trait;
     use mockito::{Matcher, Server};
-    use std::{io, sync::Mutex};
+    use std::{
+        collections::HashMap,
+        io,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
     use tempfile::TempDir;
     use tokio::fs;
 
@@ -232,6 +244,63 @@ mod tests {
                 })
             }
         }
+    }
+
+    struct CountingHashWriter {
+        hash_exists_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl HashWriter for CountingHashWriter {
+        async fn hash_exists(&self, _hash: &str) -> bool {
+            self.hash_exists_calls.fetch_add(1, Ordering::SeqCst);
+            false
+        }
+
+        async fn write_response(
+            &self,
+            _hash: &str,
+            _response: reqwest::Response,
+        ) -> Result<(), WriteError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_skips_hash_exists_without_cached_etag() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.incremental = true;
+        let args = Arc::new(args);
+
+        let writer = Arc::new(CountingHashWriter {
+            hash_exists_calls: AtomicUsize::new(0),
+        });
+        let mock = server
+            .mock("GET", "/range/AAAAA")
+            .with_status(200)
+            .with_body("test data")
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+        let cached_etags = HashMap::new();
+
+        let (hash, result) = process_single_hash(
+            reqwest::Client::new(),
+            args,
+            &base_url,
+            "AAAAA".to_string(),
+            &cached_etags,
+            CancellationToken::new(),
+            writer.clone(),
+        )
+        .await;
+
+        mock.assert_async().await;
+        assert_eq!(hash, "AAAAA");
+        assert!(result.is_ok());
+        assert_eq!(writer.hash_exists_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
