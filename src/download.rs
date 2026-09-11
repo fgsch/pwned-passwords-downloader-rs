@@ -125,6 +125,13 @@ pub async fn download_hash(
                             retries_used: retry as u64,
                         });
                     }
+                    StatusCode::NOT_MODIFIED => {
+                        return Err(DownloadError::Http {
+                            hash: hash.to_string(),
+                            status_code,
+                            retries: retry,
+                        });
+                    }
                     status_code
                         if status_code.is_client_error()
                             && status_code != StatusCode::TOO_MANY_REQUESTS =>
@@ -419,6 +426,45 @@ mod tests {
                 retries_used: 0
             }
         );
+    }
+
+    #[tokio::test]
+    async fn download_hash_not_modified_without_etag() {
+        let mut server = Server::new_async().await;
+        let temp_dir = TempDir::new().unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.max_retries = 3;
+        let writer = create_test_writer(&args);
+
+        let mock = server
+            .mock("GET", "/range/CCCCC")
+            .with_status(304)
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = format!("{}/range/", server.url());
+
+        let err = download_hash(
+            reqwest::Client::new(),
+            &args,
+            &base_url,
+            "CCCCC",
+            None,
+            &writer,
+        )
+        .await
+        .unwrap_err();
+
+        mock.assert_async().await;
+
+        assert!(matches!(
+            err,
+            DownloadError::Http {
+                status_code: StatusCode::NOT_MODIFIED,
+                retries: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
