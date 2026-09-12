@@ -91,11 +91,6 @@ impl RunStats {
         self.not_modified.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_cancelled(&self) {
-        self.mark_processed();
-        self.cancelled.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn record_retries(&self, retries_used: u64) {
         self.total_retries
             .fetch_add(retries_used, Ordering::Relaxed);
@@ -104,6 +99,9 @@ impl RunStats {
         }
     }
 
+    /// Records processed, error-category, and cancellation counters for one
+    /// download error. Retry counts are recorded separately with
+    /// `record_retries`.
     pub fn record_error(&self, err: &DownloadError) {
         self.mark_processed();
         match err {
@@ -231,7 +229,9 @@ mod tests {
         stats.record_downloaded();
         stats.record_downloaded();
         stats.record_not_modified();
-        stats.record_cancelled();
+        stats.record_error(&DownloadError::Cancelled {
+            hash: "AAAAA".to_string(),
+        });
         stats.record_retries(0);
         stats.record_retries(2);
 

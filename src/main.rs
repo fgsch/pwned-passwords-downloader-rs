@@ -195,32 +195,29 @@ async fn process_hashes(input: ProcessInput<'_>) -> (ETagDeltas, bool) {
             Ok(outcome) => {
                 stats.record_retries(outcome.retries_used);
                 match outcome.status {
-                    DownloadStatus::Downloaded { etag: Some(etag) } => {
+                    DownloadStatus::Downloaded { etag } => {
                         stats.record_downloaded();
-                        etag_deltas.updates.insert(hash, etag);
-                    }
-                    DownloadStatus::Downloaded { etag: None } => {
-                        stats.record_downloaded();
-                        etag_deltas.removals.insert(hash);
+                        match etag {
+                            Some(etag) => {
+                                etag_deltas.updates.insert(hash, etag);
+                            }
+                            None => {
+                                etag_deltas.removals.insert(hash);
+                            }
+                        }
                     }
                     DownloadStatus::NotModified => {
                         stats.record_not_modified();
                     }
                 }
             }
-            Err(DownloadError::Cancelled { .. }) => {
-                stats.record_cancelled();
+            Err(err @ DownloadError::Cancelled { .. }) => {
+                stats.record_error(&err);
                 // Exit quickly
             }
             Err(err) => {
                 had_errors = true;
-                if let Some(retries_used) = match err {
-                    DownloadError::Client { retries, .. }
-                    | DownloadError::FileOperation { retries, .. }
-                    | DownloadError::Http { retries, .. }
-                    | DownloadError::Network { retries, .. } => Some(retries as u64),
-                    DownloadError::Cancelled { .. } => None,
-                } {
+                if let Some(retries_used) = err.retries() {
                     stats.record_retries(retries_used);
                 }
                 stats.record_error(&err);

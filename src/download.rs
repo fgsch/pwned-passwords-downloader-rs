@@ -60,6 +60,18 @@ pub enum DownloadError {
     },
 }
 
+impl DownloadError {
+    pub fn retries(&self) -> Option<u64> {
+        match self {
+            Self::FileOperation { retries, .. }
+            | Self::Client { retries, .. }
+            | Self::Http { retries, .. }
+            | Self::Network { retries, .. } => Some(*retries as u64),
+            Self::Cancelled { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadOutcome {
     pub status: DownloadStatus,
