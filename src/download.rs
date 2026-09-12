@@ -226,10 +226,10 @@ mod tests {
     use super::*;
     use crate::{
         args::{CompressionFormat, HashMode, create_test_args},
-        writer::{HashWriter, WriteError, create_test_writer},
+        writer::{HashFileWriter, HashWriter, WriteError, create_test_writer},
     };
     use async_trait::async_trait;
-    use mockito::{Matcher, Server};
+    use mockito::{Matcher, Server, ServerGuard};
     use std::{
         collections::HashMap,
         io,
@@ -288,32 +288,58 @@ mod tests {
             Ok(())
         }
     }
+    struct TestSetup {
+        server: ServerGuard,
+        temp_dir: TempDir,
+        args: Args,
+        client: reqwest::Client,
+    }
+
+    impl TestSetup {
+        async fn new() -> Self {
+            let server = Server::new_async().await;
+            let temp_dir = TempDir::new().unwrap();
+            let args = create_test_args(temp_dir.path().to_path_buf());
+            let client = reqwest::Client::new();
+            Self {
+                server,
+                temp_dir,
+                args,
+                client,
+            }
+        }
+
+        fn base_url(&self) -> String {
+            format!("{}/range/", self.server.url())
+        }
+
+        fn writer(&self) -> HashFileWriter {
+            create_test_writer(&self.args)
+        }
+    }
 
     #[tokio::test]
     async fn process_single_hash_skips_hash_exists_without_cached_etag() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.incremental = true;
+        let mut setup = TestSetup::new().await;
+        setup.args.incremental = true;
 
         let writer = CountingHashWriter {
             hash_exists_calls: AtomicUsize::new(0),
         };
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/AAAAA")
             .with_status(200)
             .with_body("test data")
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
         let cached_etags = HashMap::new();
 
         let (hash, result) = process_single_hash(
-            &client,
-            &args,
+            &setup.client,
+            &setup.args,
             &base_url,
             "AAAAA".to_string(),
             &cached_etags,
@@ -330,24 +356,29 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_success() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let args = create_test_args(temp_dir.path().to_path_buf());
-        let writer = create_test_writer(&args);
-
-        let client = reqwest::Client::new();
+        let mut setup = TestSetup::new().await;
+        let writer = setup.writer();
 
         let mock_data = "test data";
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/AAAAA")
             .with_status(200)
             .with_header("etag", "\"test-etag\"")
             .with_body(mock_data)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "AAAAA", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "AAAAA",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -363,7 +394,7 @@ mod tests {
             }
         );
 
-        let file_path = temp_dir.path().join("AAAAA");
+        let file_path = setup.temp_dir.path().join("AAAAA");
         assert!(file_path.exists());
 
         let content = fs::read_to_string(&file_path).await.unwrap();
@@ -372,24 +403,29 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_ntlm_mode() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.hash_mode = HashMode::Ntlm;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.hash_mode = HashMode::Ntlm;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/HHHHH")
             .match_query(Matcher::UrlEncoded("mode".to_string(), "ntlm".to_string()))
             .with_status(200)
             .with_body("ntlm data")
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "HHHHH", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "HHHHH",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -404,28 +440,25 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_not_modified() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.incremental = true;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.incremental = true;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let file_path = temp_dir.path().join("BBBBB");
+        let file_path = setup.temp_dir.path().join("BBBBB");
         fs::write(&file_path, "existing content").await.unwrap();
 
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/BBBBB")
             .match_header("if-none-match", "\"existing-etag\"")
             .with_status(304)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
         let result = download_hash(
-            &client,
-            &args,
+            &setup.client,
+            &setup.args,
             &base_url,
             "BBBBB",
             Some("\"existing-etag\""),
@@ -448,25 +481,29 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_not_modified_without_etag() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 3;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 3;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/CCCCC")
             .with_status(304)
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let err = download_hash(&client, &args, &base_url, "CCCCC", None, &writer)
-            .await
-            .unwrap_err();
+        let err = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "CCCCC",
+            None,
+            &writer,
+        )
+        .await
+        .unwrap_err();
 
         mock.assert_async().await;
 
@@ -482,26 +519,23 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_with_ignore_missing_hash_file() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.incremental = true;
-        args.ignore_missing_hash_file = true;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.incremental = true;
+        setup.args.ignore_missing_hash_file = true;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/GGGGG")
             .match_header("if-none-match", "\"cached-etag\"")
             .with_status(304)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
         let result = download_hash(
-            &client,
-            &args,
+            &setup.client,
+            &setup.args,
             &base_url,
             "GGGGG",
             Some("\"cached-etag\""),
@@ -524,21 +558,26 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_client_error() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let args = create_test_args(temp_dir.path().to_path_buf());
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/CCCCC")
             .with_status(404)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "CCCCC", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "CCCCC",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -560,53 +599,63 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn download_hash_client_error_after_retry_reports_retry_count() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 3;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 3;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let _server_error = server
+        let _server_error = setup
+            .server
             .mock("GET", "/range/JJJJJ")
             .with_status(500)
             .expect(1)
             .create_async()
             .await;
-        let _client_error = server
+        let _client_error = setup
+            .server
             .mock("GET", "/range/JJJJJ")
             .with_status(404)
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let err = download_hash(&client, &args, &base_url, "JJJJJ", None, &writer)
-            .await
-            .unwrap_err();
+        let err = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "JJJJJ",
+            None,
+            &writer,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, DownloadError::Client { retries: 1, .. }));
     }
 
     #[tokio::test(start_paused = true)]
     async fn download_hash_server_error_with_retry() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 5;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 5;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/DDDDD")
             .with_status(500)
             .expect(6)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "DDDDD", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "DDDDD",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -628,25 +677,29 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn download_hash_zero_retries_stops_after_first_http_error() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 0;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 0;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/KKKKK")
             .with_status(500)
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let err = download_hash(&client, &args, &base_url, "KKKKK", None, &writer)
-            .await
-            .unwrap_err();
+        let err = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "KKKKK",
+            None,
+            &writer,
+        )
+        .await
+        .unwrap_err();
 
         mock.assert_async().await;
         assert!(matches!(err, DownloadError::Http { retries: 0, .. }));
@@ -654,28 +707,32 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn download_hash_zero_retries_stops_after_first_write_error() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 0;
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 0;
         let writer = FlakyWriteWriter {
             failures_remaining: Mutex::new(1),
         };
 
-        let client = reqwest::Client::new();
-
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/LLLLL")
             .with_status(200)
             .with_body("ok")
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let err = download_hash(&client, &args, &base_url, "LLLLL", None, &writer)
-            .await
-            .unwrap_err();
+        let err = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "LLLLL",
+            None,
+            &writer,
+        )
+        .await
+        .unwrap_err();
 
         mock.assert_async().await;
         assert!(matches!(
@@ -686,21 +743,19 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn download_hash_reports_retry_count_on_eventual_success() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.max_retries = 3;
-        let writer = create_test_writer(&args);
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 3;
+        let writer = setup.writer();
 
-        let client = reqwest::Client::new();
-
-        let _fail = server
+        let _fail = setup
+            .server
             .mock("GET", "/range/IIIII")
             .with_status(500)
             .expect(1)
             .create_async()
             .await;
-        let _ok = server
+        let _ok = setup
+            .server
             .mock("GET", "/range/IIIII")
             .with_status(200)
             .with_header("etag", "\"ok-etag\"")
@@ -708,9 +763,17 @@ mod tests {
             .expect(1)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "IIIII", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "IIIII",
+            None,
+            &writer,
+        )
+        .await;
         let outcome = result.unwrap();
 
         assert_eq!(outcome.retries_used, 1);
@@ -724,31 +787,36 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_with_compression() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let mut args = create_test_args(temp_dir.path().to_path_buf());
-        args.compression = CompressionFormat::Gzip;
-        let writer = create_test_writer(&args);
-
-        let client = reqwest::Client::new();
+        let mut setup = TestSetup::new().await;
+        setup.args.compression = CompressionFormat::Gzip;
+        let writer = setup.writer();
 
         let mock_data = "test compressed data";
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/EEEEE")
             .with_status(200)
             .with_header("etag", "\"gzip-etag\"")
             .with_body(mock_data)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "EEEEE", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "EEEEE",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
         assert!(result.is_ok());
 
-        let file_path = temp_dir.path().join("EEEEE.gz");
+        let file_path = setup.temp_dir.path().join("EEEEE.gz");
         assert!(file_path.exists());
 
         let content = fs::read_to_string(&file_path).await.unwrap();
@@ -757,23 +825,28 @@ mod tests {
 
     #[tokio::test]
     async fn download_hash_success_without_etag_is_still_downloaded() {
-        let mut server = Server::new_async().await;
-        let temp_dir = TempDir::new().unwrap();
-        let args = create_test_args(temp_dir.path().to_path_buf());
-        let writer = create_test_writer(&args);
-
-        let client = reqwest::Client::new();
+        let mut setup = TestSetup::new().await;
+        let writer = setup.writer();
 
         let mock_data = "body without etag";
-        let mock = server
+        let mock = setup
+            .server
             .mock("GET", "/range/MMMMM")
             .with_status(200)
             .with_body(mock_data)
             .create_async()
             .await;
-        let base_url = format!("{}/range/", server.url());
+        let base_url = setup.base_url();
 
-        let result = download_hash(&client, &args, &base_url, "MMMMM", None, &writer).await;
+        let result = download_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "MMMMM",
+            None,
+            &writer,
+        )
+        .await;
 
         mock.assert_async().await;
 
@@ -785,7 +858,7 @@ mod tests {
             }
         );
 
-        let file_path = temp_dir.path().join("MMMMM");
+        let file_path = setup.temp_dir.path().join("MMMMM");
         assert!(file_path.exists());
 
         let content = fs::read_to_string(&file_path).await.unwrap();
