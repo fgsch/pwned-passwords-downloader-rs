@@ -41,13 +41,34 @@ use args::{Args, parse_args};
 use download::{DownloadError, DownloadStatus, process_single_hash};
 use etag::{ETagCache, ETagDeltas};
 use stats::RunStats;
-use writer::{HashFileWriter, HashWriter};
+use writer::{HashFileWriter, HashWriter, ScanOutcome, ScanProgressObserver};
 
 const ETAG_CACHE_FILENAME: &str = ".etag_cache.json";
 // HIBP API base URL.
 const HIBP_BASE_URL: &str = "https://api.pwnedpasswords.com/range/";
 // Maximum hash value for HIBP API. This covers all possible SHA-1 hash prefixes (5 hex digits).
 const HASH_MAX: u64 = 0xFFFFF;
+
+struct ScanProgress {
+    span: tracing::Span,
+}
+
+impl ScanProgress {
+    fn new() -> Self {
+        let span = tracing::info_span!("scan");
+        span.pb_set_style(&scan_progress_style());
+        span.pb_set_length(u64::MAX);
+        span.pb_set_message("Scanning existing hashes (entries): ");
+        span.pb_start();
+        Self { span }
+    }
+}
+
+impl ScanProgressObserver for ScanProgress {
+    fn entry_scanned(&self) {
+        self.span.pb_inc(1);
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -65,7 +86,7 @@ async fn main() {
 }
 
 async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
-    let span = init_tracing();
+    init_tracing();
 
     let (args, client) = parse_args()?;
 
@@ -74,19 +95,40 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
         ETagCache::load(&etag_cache_path, args.hash_mode.clone(), args.incremental).await?;
 
     let token = spawn_ctrl_c_handler();
+    let stats = Arc::new(RunStats::new(HASH_MAX + 1));
+    let mut file_writer =
+        HashFileWriter::new(args.output_directory.clone(), args.compression.as_str());
 
+    if args.incremental && !args.ignore_missing_hash_file && !etag_cache.etags.is_empty() {
+        let scan_progress = (!args.quiet).then(ScanProgress::new);
+        let outcome = file_writer
+            .scan_existing_hashes(
+                &token,
+                scan_progress
+                    .as_ref()
+                    .map(|progress| progress as &dyn ScanProgressObserver),
+            )
+            .await?;
+        drop(scan_progress);
+
+        if matches!(outcome, ScanOutcome::Cancelled) {
+            if !args.quiet {
+                stats.log_summary(true);
+            }
+            return Ok(true);
+        }
+    }
+
+    let span = new_download_span();
     if !args.quiet {
         span.pb_start();
     }
-
-    let writer = HashFileWriter::new(args.output_directory.clone(), args.compression.as_str());
-    let stats = Arc::new(RunStats::new(HASH_MAX + 1));
 
     let (etag_deltas, had_errors) = process_hashes(ProcessInput {
         span: &span,
         client: &client,
         args: &args,
-        writer: &writer,
+        writer: &file_writer,
         token: &token,
         cached_etags: &etag_cache.etags,
         stats: stats.clone(),
@@ -107,7 +149,7 @@ async fn try_main() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(cancelled || had_errors)
 }
 
-fn init_tracing() -> tracing::Span {
+fn init_tracing() {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "[{elapsed_precise}] [{wide_bar}] {pos:>7}/{len:7} ({percent:>3}%) ETA: {eta}",
@@ -133,9 +175,16 @@ fn init_tracing() -> tracing::Span {
         )
         .with(indicatif_layer.with_filter(app_span_filter))
         .init();
-    let span = tracing::info_span!("span");
+}
+
+fn new_download_span() -> tracing::Span {
+    let span = tracing::info_span!("download");
     span.pb_set_length(HASH_MAX + 1);
     span
+}
+
+fn scan_progress_style() -> ProgressStyle {
+    ProgressStyle::with_template("[{elapsed_precise}] {msg}{pos}").unwrap()
 }
 
 fn spawn_ctrl_c_handler() -> CancellationToken {

@@ -23,7 +23,7 @@ use futures::TryStreamExt as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt as _};
-use tokio_util::io::StreamReader;
+use tokio_util::{io::StreamReader, sync::CancellationToken};
 
 #[derive(Error, Debug)]
 pub enum WriteError {
@@ -46,12 +46,83 @@ pub enum WriteError {
         #[source]
         source: std::io::Error,
     },
+    #[error("scan existing hashes at {path} failed: {source}")]
+    Scan {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl WriteError {
     pub fn is_retriable(&self) -> bool {
         matches!(self, WriteError::ReadWrite { .. })
     }
+}
+
+fn scan_error(path: &Path, source: std::io::Error) -> WriteError {
+    WriteError::Scan {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ScanOutcome {
+    Completed,
+    Cancelled,
+}
+
+pub(crate) trait ScanProgressObserver {
+    fn entry_scanned(&self);
+}
+
+const HASH_SPACE: usize = 1 << 20;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExistingHashes {
+    present: Vec<bool>,
+}
+
+impl ExistingHashes {
+    fn new() -> Self {
+        Self {
+            present: vec![false; HASH_SPACE],
+        }
+    }
+
+    fn insert(&mut self, file_name: &str, extension: &str) {
+        if let Some(hash) = hash_from_file_name(file_name, extension) {
+            self.present[hash] = true;
+        }
+    }
+
+    fn contains(&self, hash: &str) -> bool {
+        hash_from_file_name(hash, "").is_some_and(|hash| self.present[hash])
+    }
+}
+
+fn hash_from_file_name(file_name: &str, extension: &str) -> Option<usize> {
+    let hash = if extension.is_empty() {
+        file_name
+    } else {
+        let suffix_start = file_name.len().checked_sub(extension.len() + 1)?;
+        if file_name.as_bytes().get(suffix_start) != Some(&b'.') || !file_name.ends_with(extension)
+        {
+            return None;
+        }
+        &file_name[..suffix_start]
+    };
+
+    if hash.len() != 5
+        || !hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    {
+        return None;
+    }
+
+    usize::from_str_radix(hash, 16).ok()
 }
 
 struct TempFileGuard<'a> {
@@ -81,6 +152,7 @@ pub trait HashWriter: Send + Sync {
 pub struct HashFileWriter {
     output_directory: PathBuf,
     extension: &'static str,
+    existing_hashes: Option<ExistingHashes>,
 }
 
 impl HashFileWriter {
@@ -88,7 +160,63 @@ impl HashFileWriter {
         Self {
             output_directory,
             extension,
+            existing_hashes: None,
         }
+    }
+
+    pub(crate) async fn scan_existing_hashes(
+        &mut self,
+        cancellation_token: &CancellationToken,
+        progress: Option<&dyn ScanProgressObserver>,
+    ) -> Result<ScanOutcome, WriteError> {
+        let mut existing_hashes = ExistingHashes::new();
+        let output_directory = self.output_directory.as_path();
+        let mut entries = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return Ok(ScanOutcome::Cancelled),
+            entries = fs::read_dir(output_directory) => {
+                entries.map_err(|source| scan_error(output_directory, source))?
+            }
+        };
+
+        loop {
+            let entry = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Ok(ScanOutcome::Cancelled),
+                entry = entries.next_entry() => {
+                    entry.map_err(|source| scan_error(output_directory, source))?
+                }
+            };
+            let Some(entry) = entry else {
+                break;
+            };
+
+            let entry_path = entry.path();
+            let file_type = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return Ok(ScanOutcome::Cancelled),
+                file_type = entry.file_type() => {
+                    file_type.map_err(|source| scan_error(&entry_path, source))?
+                }
+            };
+
+            if let Some(progress) = progress {
+                progress.entry_scanned();
+            }
+
+            if file_type.is_file()
+                && let Some(file_name) = entry.file_name().to_str()
+            {
+                existing_hashes.insert(file_name, self.extension);
+            }
+        }
+
+        if cancellation_token.is_cancelled() {
+            return Ok(ScanOutcome::Cancelled);
+        }
+
+        self.existing_hashes = Some(existing_hashes);
+        Ok(ScanOutcome::Completed)
     }
 
     fn hash_path(&self, hash: &str) -> PathBuf {
@@ -101,8 +229,10 @@ impl HashFileWriter {
 #[async_trait]
 impl HashWriter for HashFileWriter {
     async fn hash_exists(&self, hash: &str) -> bool {
-        let final_path = self.hash_path(hash);
-        fs::try_exists(&final_path).await.unwrap_or(false)
+        self.existing_hashes
+            .as_ref()
+            .expect("scan_existing_hashes must complete before hash_exists")
+            .contains(hash)
     }
 
     async fn write_response(
@@ -164,8 +294,33 @@ pub fn create_test_writer(args: &crate::args::Args) -> HashFileWriter {
 mod tests {
     use super::*;
     use crate::args::create_test_args;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use tokio::fs;
+    use tokio_util::sync::CancellationToken;
+
+    struct CountingProgress {
+        entries: AtomicUsize,
+    }
+
+    impl ScanProgressObserver for CountingProgress {
+        fn entry_scanned(&self) {
+            self.entries.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct CancellingProgress {
+        token: CancellationToken,
+        entries: AtomicUsize,
+    }
+
+    impl ScanProgressObserver for CancellingProgress {
+        fn entry_scanned(&self) {
+            if self.entries.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.token.cancel();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn write_hash_to_file_success() {
@@ -210,5 +365,170 @@ mod tests {
 
         let content = fs::read_to_string(&final_path).await.unwrap();
         assert_eq!(content, "new content");
+    }
+
+    #[tokio::test]
+    async fn scan_existing_hashes_recognizes_uncompressed_files() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("ABCDE"), "existing")
+            .await
+            .unwrap();
+        fs::write(temp_dir.path().join("ABCDE.gz"), "wrong extension")
+            .await
+            .unwrap();
+        fs::write(temp_dir.path().join("ABCDF."), "empty suffix")
+            .await
+            .unwrap();
+
+        let mut writer = HashFileWriter::new(temp_dir.path().to_path_buf(), "");
+        let outcome = writer
+            .scan_existing_hashes(&CancellationToken::new(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ScanOutcome::Completed);
+        assert!(writer.hash_exists("ABCDE").await);
+        assert!(!writer.hash_exists("ABCDF").await);
+    }
+
+    #[tokio::test]
+    async fn scan_existing_hashes_recognizes_configured_compression() {
+        for extension in ["gz", "br"] {
+            let temp_dir = TempDir::new().unwrap();
+            let matching_name = format!("ABCDE.{extension}");
+            fs::write(temp_dir.path().join(matching_name), "existing")
+                .await
+                .unwrap();
+            fs::write(temp_dir.path().join("ABCDF"), "wrong extension")
+                .await
+                .unwrap();
+
+            let mut writer = HashFileWriter::new(temp_dir.path().to_path_buf(), extension);
+            let outcome = writer
+                .scan_existing_hashes(&CancellationToken::new(), None)
+                .await
+                .unwrap();
+
+            assert_eq!(outcome, ScanOutcome::Completed);
+            assert!(writer.hash_exists("ABCDE").await);
+            assert!(!writer.hash_exists("ABCDF").await);
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_existing_hashes_ignores_unrelated_entries_and_reports_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut expected_entries = 0;
+
+        fs::write(temp_dir.path().join("AAAAA.gz"), "existing")
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::create_dir(temp_dir.path().join("BBBBB.gz"))
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::write(temp_dir.path().join("DDDDD.part"), "partial")
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::write(temp_dir.path().join(".etag_cache.json"), "cache")
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::write(temp_dir.path().join("EEEEE.br"), "wrong extension")
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::write(temp_dir.path().join("fffff.gz"), "lowercase")
+            .await
+            .unwrap();
+        expected_entries += 1;
+        fs::write(temp_dir.path().join("GGGGG.gz"), "malformed")
+            .await
+            .unwrap();
+        expected_entries += 1;
+
+        #[cfg(unix)]
+        let symlink_target_dir = TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let target = symlink_target_dir.path().join("target");
+            fs::write(&target, "target").await.unwrap();
+            symlink(&target, temp_dir.path().join("CCCCC.gz")).unwrap();
+            expected_entries += 1;
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+
+            let non_utf8_name = OsString::from_vec(vec![0xff, b'.', b'g', b'z']);
+            fs::write(temp_dir.path().join(non_utf8_name), "non-utf8")
+                .await
+                .unwrap();
+            expected_entries += 1;
+        }
+
+        let progress = CountingProgress {
+            entries: AtomicUsize::new(0),
+        };
+        let mut writer = HashFileWriter::new(temp_dir.path().to_path_buf(), "gz");
+        let outcome = writer
+            .scan_existing_hashes(&CancellationToken::new(), Some(&progress))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ScanOutcome::Completed);
+        assert_eq!(progress.entries.load(Ordering::SeqCst), expected_entries);
+        assert!(writer.hash_exists("AAAAA").await);
+        for hash in ["BBBBB", "CCCCC", "DDDDD", "EEEEE", "FFFFF", "GGGGG"] {
+            assert!(!writer.hash_exists(hash).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_existing_hashes_reports_missing_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let missing_directory = temp_dir.path().join("missing");
+        let mut writer = HashFileWriter::new(missing_directory.clone(), "");
+
+        let error = writer
+            .scan_existing_hashes(&CancellationToken::new(), None)
+            .await
+            .unwrap_err();
+
+        match error {
+            WriteError::Scan { path, .. } => {
+                assert_eq!(path, missing_directory.display().to_string());
+            }
+            error => panic!("unexpected scan error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_existing_hashes_cancellation_discards_partial_index() {
+        let temp_dir = TempDir::new().unwrap();
+        let hash_path = temp_dir.path().join("AAAAA");
+        fs::write(&hash_path, "existing").await.unwrap();
+
+        let token = CancellationToken::new();
+        let progress = CancellingProgress {
+            token: token.clone(),
+            entries: AtomicUsize::new(0),
+        };
+        let mut writer = HashFileWriter::new(temp_dir.path().to_path_buf(), "");
+
+        let outcome = writer
+            .scan_existing_hashes(&token, Some(&progress))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, ScanOutcome::Cancelled);
+        assert_eq!(progress.entries.load(Ordering::SeqCst), 1);
+        assert!(writer.existing_hashes.is_none());
     }
 }

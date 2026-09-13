@@ -213,8 +213,9 @@ pub async fn process_single_hash(
         None
     };
     let result = tokio::select! {
-        res = download_hash(client, args, base_url, &hash, etag, writer) => res,
+        biased;
         _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
+        res = download_hash(client, args, base_url, &hash, etag, writer) => res,
     };
     (hash, result)
 }
@@ -350,6 +351,99 @@ mod tests {
         assert_eq!(hash, "AAAAA");
         assert!(result.is_ok());
         assert_eq!(writer.hash_exists_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_uses_scanned_existing_hash_index() {
+        let mut setup = TestSetup::new().await;
+        setup.args.incremental = true;
+        fs::write(setup.temp_dir.path().join("AAAAA"), "existing")
+            .await
+            .unwrap();
+
+        let token = CancellationToken::new();
+        let mut writer = setup.writer();
+        writer.scan_existing_hashes(&token, None).await.unwrap();
+        // The scanned index is a snapshot; this file is created afterward.
+        fs::write(setup.temp_dir.path().join("BBBBB"), "created-after-scan")
+            .await
+            .unwrap();
+
+        let cached_etags = HashMap::from([
+            ("AAAAA".to_string(), "\"existing-etag\"".to_string()),
+            ("BBBBB".to_string(), "\"missing-etag\"".to_string()),
+            ("CCCCC".to_string(), "\"ignored-missing-etag\"".to_string()),
+        ]);
+
+        let existing_mock = setup
+            .server
+            .mock("GET", "/range/AAAAA")
+            .match_header("if-none-match", "\"existing-etag\"")
+            .with_status(304)
+            .create_async()
+            .await;
+        let base_url = setup.base_url();
+        let (_, result) = process_single_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "AAAAA".to_string(),
+            &cached_etags,
+            &token,
+            &writer,
+        )
+        .await;
+        existing_mock.assert_async().await;
+        assert_eq!(result.unwrap().status, DownloadStatus::NotModified);
+
+        let missing_mock = setup
+            .server
+            .mock("GET", "/range/BBBBB")
+            .match_header("if-none-match", Matcher::Missing)
+            .with_status(304)
+            .create_async()
+            .await;
+        let (_, result) = process_single_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "BBBBB".to_string(),
+            &cached_etags,
+            &token,
+            &writer,
+        )
+        .await;
+        missing_mock.assert_async().await;
+        assert!(matches!(
+            result,
+            Err(DownloadError::Http {
+                status_code: StatusCode::NOT_MODIFIED,
+                retries: 0,
+                ..
+            })
+        ));
+
+        setup.args.ignore_missing_hash_file = true;
+        let ignored_missing_writer = setup.writer();
+        let ignored_missing_mock = setup
+            .server
+            .mock("GET", "/range/CCCCC")
+            .match_header("if-none-match", "\"ignored-missing-etag\"")
+            .with_status(304)
+            .create_async()
+            .await;
+        let (_, result) = process_single_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "CCCCC".to_string(),
+            &cached_etags,
+            &token,
+            &ignored_missing_writer,
+        )
+        .await;
+        ignored_missing_mock.assert_async().await;
+        assert_eq!(result.unwrap().status, DownloadStatus::NotModified);
     }
 
     #[tokio::test]
