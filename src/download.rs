@@ -201,18 +201,16 @@ pub async fn process_single_hash(
     token: &CancellationToken,
     writer: &dyn HashWriter,
 ) -> (String, Result<DownloadOutcome, DownloadError>) {
-    let etag = if !args.incremental {
-        None
-    } else {
-        let cached_etag = cached_etags.get(&hash);
-
-        if args.ignore_missing_hash_file
-            || (cached_etag.is_some() && writer.hash_exists(&hash).await)
+    let etag = if args.incremental {
+        if let Some(etag) = cached_etags.get(&hash)
+            && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await)
         {
-            cached_etag.map(String::as_str)
+            Some(etag.as_str())
         } else {
             None
         }
+    } else {
+        None
     };
     let result = tokio::select! {
         res = download_hash(client, args, base_url, &hash, etag, writer) => res,
