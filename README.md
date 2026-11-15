@@ -18,7 +18,8 @@ and multiple compression formats.
 - **Hash mode support**: Download SHA-1 (default) or NTLM hash ranges
 - **Progress tracking**: Visual progress bar with ETA
 - **Run statistics**: Final hash outcomes, HTTP response counts, network errors,
-  request latency summaries, throughput, and measured average duration per hash
+  request and file I/O latency summaries, finalized output bytes, throughput,
+  and measured average duration per hash
 - **Retry mechanism**: Configurable retry attempts for failed requests
 
 ## Installation
@@ -125,6 +126,16 @@ with minimum, average, approximate p50/p95 bounds, and maximum in milliseconds.
 retry waits and file writing, also in milliseconds. `rate_hps` is processed hashes
 divided by the statistics' elapsed time; it is not the reciprocal of `avg` when
 downloads run concurrently.
+
+`body_read` and `file_write` use the same latency summaries for successfully
+finalized files. They measure accumulated I/O operation time, including waiting;
+`file_write` also includes flushing, shutdown, closing the file, and renaming it
+into place. These are not separate end-to-end phases that can simply be added.
+
+`bytes_written` is the exact number of successfully finalized output bytes.
+It counts compressed bytes when storing compressed files and decompressed bytes
+otherwise, not network traffic. Unchanged responses and failed or cancelled
+writes contribute no I/O samples or bytes; partial failed writes are excluded.
 
 ## License
 

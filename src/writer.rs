@@ -20,9 +20,18 @@
 
 use async_trait::async_trait;
 use futures::TryStreamExt as _;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 use thiserror::Error;
-use tokio::{fs, io::AsyncWriteExt as _};
+use tokio::{
+    fs,
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt as _, ReadBuf},
+    time::Instant,
+};
 use tokio_util::{io::StreamReader, sync::CancellationToken};
 
 #[derive(Error, Debug)]
@@ -138,6 +147,92 @@ impl Drop for TempFileGuard<'_> {
     }
 }
 
+struct TimedReader<R> {
+    inner: R,
+    elapsed: Duration,
+    pending_since: Option<Instant>,
+}
+
+impl<R> TimedReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            elapsed: Duration::ZERO,
+            pending_since: None,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for TimedReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let started = *self.pending_since.get_or_insert_with(Instant::now);
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if result.is_ready() {
+            self.elapsed += started.elapsed();
+            self.pending_since = None;
+        }
+        result
+    }
+}
+
+struct TimedWriter<W> {
+    inner: W,
+    elapsed: Duration,
+    pending_since: Option<Instant>,
+}
+
+impl<W> TimedWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            elapsed: Duration::ZERO,
+            pending_since: None,
+        }
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for TimedWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let started = *self.pending_since.get_or_insert_with(Instant::now);
+        let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if result.is_ready() {
+            self.elapsed += started.elapsed();
+            self.pending_since = None;
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let started = *self.pending_since.get_or_insert_with(Instant::now);
+        let result = Pin::new(&mut self.inner).poll_flush(cx);
+        if result.is_ready() {
+            self.elapsed += started.elapsed();
+            self.pending_since = None;
+        }
+        result
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WriteMetrics {
+    pub bytes_written: u64,
+    pub body_read: Duration,
+    /// Write and flush time plus shutdown, close, and atomic rename time.
+    pub file_write: Duration,
+}
+
 #[async_trait]
 pub trait HashWriter: Send + Sync {
     async fn hash_exists(&self, hash: &str) -> bool;
@@ -145,7 +240,7 @@ pub trait HashWriter: Send + Sync {
         &self,
         hash: &str,
         response: reqwest::Response,
-    ) -> Result<(), WriteError>;
+    ) -> Result<WriteMetrics, WriteError>;
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +334,7 @@ impl HashWriter for HashFileWriter {
         &self,
         hash: &str,
         response: reqwest::Response,
-    ) -> Result<(), WriteError> {
+    ) -> Result<WriteMetrics, WriteError> {
         let final_path = self.hash_path(hash);
         let part_path = final_path.with_extension("part");
 
@@ -254,34 +349,38 @@ impl HashWriter for HashFileWriter {
             path: part_path.display().to_string(),
             source,
         })?;
-        let mut file = fs::File::from_std(file);
+        let mut file = TimedWriter::new(fs::File::from_std(file));
 
         let stream = response.bytes_stream().map_err(std::io::Error::other);
-        let mut reader = StreamReader::new(stream);
+        let mut reader = TimedReader::new(StreamReader::new(stream));
 
-        match tokio::io::copy(&mut reader, &mut file).await {
-            Ok(_) => {
-                file.shutdown().await.map_err(|source| WriteError::Rename {
-                    path: part_path.display().to_string(),
-                    target: final_path.display().to_string(),
-                    source,
-                })?;
-                drop(file);
-                fs::rename(&part_path, &final_path)
-                    .await
-                    .map_err(|source| WriteError::Rename {
-                        path: part_path.display().to_string(),
-                        target: final_path.display().to_string(),
-                        source,
-                    })?;
-                guard.delete_on_drop = false;
-                Ok(())
-            }
-            Err(err) => Err(WriteError::ReadWrite {
+        let bytes_written = tokio::io::copy(&mut reader, &mut file)
+            .await
+            .map_err(|source| WriteError::ReadWrite {
                 path: final_path.display().to_string(),
-                source: err,
-            }),
-        }
+                source,
+            })?;
+        let finalize_started = Instant::now();
+        file.shutdown().await.map_err(|source| WriteError::Rename {
+            path: part_path.display().to_string(),
+            target: final_path.display().to_string(),
+            source,
+        })?;
+        let file_write = file.elapsed;
+        drop(file);
+        fs::rename(&part_path, &final_path)
+            .await
+            .map_err(|source| WriteError::Rename {
+                path: part_path.display().to_string(),
+                target: final_path.display().to_string(),
+                source,
+            })?;
+        guard.delete_on_drop = false;
+        Ok(WriteMetrics {
+            bytes_written,
+            body_read: reader.elapsed,
+            file_write: file_write + finalize_started.elapsed(),
+        })
     }
 }
 
@@ -296,7 +395,7 @@ mod tests {
     use crate::args::create_test_args;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
-    use tokio::fs;
+    use tokio::{fs, io::AsyncReadExt as _};
     use tokio_util::sync::CancellationToken;
 
     struct CountingProgress {
@@ -337,13 +436,13 @@ mod tests {
                 .unwrap(),
         );
 
-        let result = writer.write_response("FFFFF", response).await;
+        let metrics = writer.write_response("FFFFF", response).await.unwrap();
 
-        assert!(result.is_ok());
         assert!(final_path.exists());
 
         let content = fs::read_to_string(&final_path).await.unwrap();
         assert_eq!(content, mock_body);
+        assert_eq!(metrics.bytes_written, content.len() as u64);
     }
 
     #[tokio::test]
@@ -361,10 +460,114 @@ mod tests {
                 .unwrap(),
         );
 
-        writer.write_response("FFFFF", response).await.unwrap();
+        let metrics = writer.write_response("FFFFF", response).await.unwrap();
 
         let content = fs::read_to_string(&final_path).await.unwrap();
         assert_eq!(content, "new content");
+        assert_eq!(metrics.bytes_written, content.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn write_hash_to_file_body_error_removes_partial_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let writer = HashFileWriter::new(temp_dir.path().to_path_buf(), "");
+        let body = reqwest::Body::wrap_stream(futures::stream::iter([
+            Ok("partial content"),
+            Err(std::io::Error::other("body failed")),
+        ]));
+        let response = reqwest::Response::from(http::Response::new(body));
+
+        let result = writer.write_response("FFFFF", response).await;
+
+        assert!(matches!(result, Err(WriteError::ReadWrite { .. })));
+        assert!(!temp_dir.path().join("FFFFF").exists());
+        assert!(!temp_dir.path().join("FFFFF.part").exists());
+    }
+
+    #[tokio::test]
+    async fn write_hash_to_file_rename_error_removes_partial_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let final_path = temp_dir.path().join("FFFFF");
+        fs::create_dir(&final_path).await.unwrap();
+        let writer = HashFileWriter::new(temp_dir.path().to_path_buf(), "");
+        let response = reqwest::Response::from(http::Response::new("content"));
+
+        let result = writer.write_response("FFFFF", response).await;
+
+        assert!(matches!(result, Err(WriteError::Rename { .. })));
+        assert!(final_path.is_dir());
+        assert!(!temp_dir.path().join("FFFFF.part").exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_reader_accumulates_pending_reads() {
+        let (mut source, stream) = tokio::io::duplex(1);
+        let mut reader = TimedReader::new(stream);
+
+        for delay in [7, 11] {
+            let mut byte = [0];
+            {
+                let read = reader.read_exact(&mut byte);
+                tokio::pin!(read);
+                assert!(futures::poll!(&mut read).is_pending());
+                tokio::time::advance(Duration::from_millis(delay)).await;
+                assert!(futures::poll!(&mut read).is_pending());
+                source.write_all(b"x").await.unwrap();
+                read.await.unwrap();
+            }
+            assert_eq!(&byte, b"x");
+        }
+
+        assert_eq!(reader.elapsed, Duration::from_millis(18));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_writer_includes_pending_write_wait() {
+        let (stream, mut destination) = tokio::io::duplex(1);
+        let mut writer = TimedWriter::new(stream);
+        writer.write_all(b"a").await.unwrap();
+
+        {
+            let write = writer.write_all(b"b");
+            tokio::pin!(write);
+            assert!(futures::poll!(&mut write).is_pending());
+            tokio::time::advance(Duration::from_millis(13)).await;
+            assert!(futures::poll!(&mut write).is_pending());
+            let mut byte = [0];
+            destination.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"a");
+            write.await.unwrap();
+        }
+
+        assert_eq!(writer.elapsed, Duration::from_millis(13));
+        let mut byte = [0];
+        destination.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"b");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_writer_includes_pending_flush_wait() {
+        let (mut stream, mut destination) = tokio::io::duplex(1);
+        stream.write_all(b"a").await.unwrap();
+        let mut writer = TimedWriter::new(tokio::io::BufWriter::with_capacity(2, stream));
+        writer.write_all(b"b").await.unwrap();
+
+        {
+            let flush = writer.flush();
+            tokio::pin!(flush);
+            assert!(futures::poll!(&mut flush).is_pending());
+            tokio::time::advance(Duration::from_millis(17)).await;
+            assert!(futures::poll!(&mut flush).is_pending());
+            let mut byte = [0];
+            destination.read_exact(&mut byte).await.unwrap();
+            assert_eq!(&byte, b"a");
+            flush.await.unwrap();
+        }
+
+        assert_eq!(writer.elapsed, Duration::from_millis(17));
+        let mut byte = [0];
+        destination.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"b");
     }
 
     #[test]

@@ -94,6 +94,7 @@ async fn write_response_if_modified(
     response: reqwest::Response,
     etag: Option<&str>,
     writer: &dyn HashWriter,
+    stats: &RunStats,
 ) -> Result<DownloadStatus, WriteError> {
     let response_etag = response
         .headers()
@@ -108,7 +109,8 @@ async fn write_response_if_modified(
     }
 
     let etag = response_etag.map(String::from);
-    writer.write_response(hash, response).await?;
+    let metrics = writer.write_response(hash, response).await?;
+    stats.record_write(metrics);
     Ok(DownloadStatus::Downloaded { etag })
 }
 
@@ -157,8 +159,14 @@ impl DownloadContext<'_> {
                     let status_code = response.status();
                     match status_code {
                         StatusCode::OK => {
-                            match write_response_if_modified(hash, response, etag, self.writer)
-                                .await
+                            match write_response_if_modified(
+                                hash,
+                                response,
+                                etag,
+                                self.writer,
+                                self.stats,
+                            )
+                            .await
                             {
                                 Ok(status) => {
                                     return Ok(DownloadOutcome {
@@ -268,7 +276,7 @@ mod tests {
     use super::*;
     use crate::{
         args::{CompressionFormat, HashMode, create_test_args},
-        writer::{HashFileWriter, HashWriter, WriteError, create_test_writer},
+        writer::{HashFileWriter, HashWriter, WriteError, WriteMetrics, create_test_writer},
     };
     use async_trait::async_trait;
     use mockito::{Matcher, Server, ServerGuard};
@@ -297,10 +305,10 @@ mod tests {
             &self,
             _hash: &str,
             _response: reqwest::Response,
-        ) -> Result<(), WriteError> {
+        ) -> Result<WriteMetrics, WriteError> {
             let mut failures_remaining = self.failures_remaining.lock().unwrap();
             if *failures_remaining == 0 {
-                Ok(())
+                Ok(WriteMetrics::default())
             } else {
                 *failures_remaining -= 1;
                 Err(WriteError::ReadWrite {
@@ -326,8 +334,8 @@ mod tests {
             &self,
             _hash: &str,
             _response: reqwest::Response,
-        ) -> Result<(), WriteError> {
-            Ok(())
+        ) -> Result<WriteMetrics, WriteError> {
+            Ok(WriteMetrics::default())
         }
     }
     struct TestSetup {
@@ -526,6 +534,9 @@ mod tests {
             assert_eq!(snapshot.responses_ok, 1);
             assert_eq!(snapshot.responses_not_modified, 0);
             assert_eq!(snapshot.request_latency.unwrap().count, 1);
+            assert_eq!(snapshot.bytes_written, 0);
+            assert_eq!(snapshot.body_read_latency, None);
+            assert_eq!(snapshot.file_write_latency, None);
             assert_eq!(
                 result.unwrap(),
                 DownloadOutcome {
@@ -569,6 +580,10 @@ mod tests {
                 .await;
 
             mock.assert_async().await;
+            let snapshot = setup.stats.snapshot(false);
+            assert_eq!(snapshot.bytes_written, "updated content".len() as u64);
+            assert_eq!(snapshot.body_read_latency.unwrap().count, 1);
+            assert_eq!(snapshot.file_write_latency.unwrap().count, 1);
             assert_eq!(
                 result.unwrap(),
                 DownloadOutcome {
@@ -743,6 +758,9 @@ mod tests {
         assert_eq!(snapshot.responses_ok, 0);
         assert_eq!(snapshot.responses_not_modified, 1);
         assert_eq!(snapshot.request_latency.unwrap().count, 1);
+        assert_eq!(snapshot.bytes_written, 0);
+        assert_eq!(snapshot.body_read_latency, None);
+        assert_eq!(snapshot.file_write_latency, None);
 
         assert!(result.is_ok());
         let outcome = result.unwrap();
@@ -999,6 +1017,46 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn download_hash_does_not_record_output_when_rename_fails() {
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 0;
+        let writer = setup.writer();
+        let file_path = setup.temp_dir.path().join("AAAAA");
+        fs::create_dir(&file_path).await.unwrap();
+        let mock = setup
+            .server
+            .mock("GET", "/range/AAAAA")
+            .with_status(200)
+            .with_body("copied but not finalized")
+            .expect(1)
+            .create_async()
+            .await;
+        let base_url = setup.base_url();
+
+        let err = setup
+            .context(&base_url, &writer)
+            .download_hash("AAAAA", None)
+            .await
+            .unwrap_err();
+
+        mock.assert_async().await;
+        assert!(matches!(
+            err,
+            DownloadError::FileOperation {
+                source: WriteError::Rename { .. },
+                retries: 0,
+            }
+        ));
+        assert!(fs::metadata(&file_path).await.unwrap().is_dir());
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_ok, 1);
+        assert_eq!(snapshot.bytes_written, 0);
+        assert_eq!(snapshot.body_read_latency, None);
+        assert_eq!(snapshot.file_write_latency, None);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn download_hash_reports_retry_count_on_eventual_success() {
         let mut setup = TestSetup::new().await;
@@ -1043,6 +1101,9 @@ mod tests {
         assert_eq!(snapshot.request_latency.unwrap().count, 2);
         assert_eq!(snapshot.processed, 0);
         assert_eq!(snapshot.total_retries, 0);
+        assert_eq!(snapshot.bytes_written, 2);
+        assert_eq!(snapshot.body_read_latency.unwrap().count, 1);
+        assert_eq!(snapshot.file_write_latency.unwrap().count, 1);
     }
 
     #[tokio::test]
@@ -1115,6 +1176,9 @@ mod tests {
         assert!(snapshot.request_latency.is_none());
         assert_eq!(snapshot.processed, 0);
         assert_eq!(snapshot.cancelled, 0);
+        assert_eq!(snapshot.bytes_written, 0);
+        assert_eq!(snapshot.body_read_latency, None);
+        assert_eq!(snapshot.file_write_latency, None);
     }
 
     #[tokio::test]

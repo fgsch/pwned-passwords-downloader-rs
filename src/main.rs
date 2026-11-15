@@ -412,11 +412,97 @@ mod tests {
         assert_eq!(snapshot.errors_total, 0);
         assert_eq!(snapshot.total_retries, 1);
         assert_eq!(snapshot.retried_requests, 1);
+        assert_eq!(snapshot.bytes_written, 0);
+        assert!(snapshot.body_read_latency.is_none());
+        assert!(snapshot.file_write_latency.is_none());
         let request_latency = snapshot.request_latency.unwrap();
         assert_eq!(request_latency.count, 2);
         assert!(
             snapshot.avg_end_to_end_per_processed_secs.unwrap() * 1_000.0
                 >= request_latency.average_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn process_hashes_counts_only_successfully_finalized_output() {
+        let mut server = Server::new_async().await;
+        let unchanged_mock = server
+            .mock("GET", "/range/00000")
+            .match_header("if-none-match", "W/\"same-etag\"")
+            .with_status(200)
+            .with_header("etag", "\"same-etag\"")
+            .with_body("existing content")
+            .create_async()
+            .await;
+        let write_mock = server
+            .mock("GET", "/range/00001")
+            .match_header("if-none-match", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("etag", "\"new-etag\"")
+            .with_body("new file")
+            .create_async()
+            .await;
+        let failure_mock = server
+            .mock("GET", "/range/00002")
+            .match_header("if-none-match", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_body("failed output")
+            .create_async()
+            .await;
+        let temp_dir = TempDir::new().unwrap();
+        tokio::fs::write(temp_dir.path().join("00000"), "existing content")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(temp_dir.path().join("00002"))
+            .await
+            .unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.incremental = true;
+        args.max_retries = 0;
+        let token = CancellationToken::new();
+        let mut writer = create_test_writer(&args);
+        writer.scan_existing_hashes(&token, None).await.unwrap();
+        let client = reqwest::Client::new();
+        let cached_etags = HashMap::from([
+            ("00000".to_string(), "W/\"same-etag\"".to_string()),
+            ("00002".to_string(), "\"old-etag\"".to_string()),
+        ]);
+        let stats = Arc::new(RunStats::new(3));
+        let span = tracing::info_span!("test");
+        let base_url = format!("{}/range/", server.url());
+
+        let (deltas, had_errors) = process_hashes(ProcessInput {
+            span: &span,
+            client: &client,
+            args: &args,
+            writer: &writer,
+            token: &token,
+            cached_etags: &cached_etags,
+            stats: stats.clone(),
+            base_url: &base_url,
+            hashes: 0..=2,
+        })
+        .await;
+
+        unchanged_mock.assert_async().await;
+        write_mock.assert_async().await;
+        failure_mock.assert_async().await;
+        assert!(had_errors);
+        assert_eq!(deltas.updates.get("00001").unwrap(), "\"new-etag\"");
+        assert!(deltas.removals.contains("00002"));
+        let snapshot = stats.snapshot(false);
+        assert_eq!(snapshot.processed, 3);
+        assert_eq!(snapshot.downloaded_or_updated, 1);
+        assert_eq!(snapshot.not_modified, 1);
+        assert_eq!(snapshot.error_file, 1);
+        assert_eq!(snapshot.bytes_written, "new file".len() as u64);
+        assert_eq!(snapshot.body_read_latency.unwrap().count, 1);
+        assert_eq!(snapshot.file_write_latency.unwrap().count, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(temp_dir.path().join("00001"))
+                .await
+                .unwrap(),
+            "new file"
         );
     }
 }

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::download::DownloadError;
 use crate::metrics::{LatencySnapshot, LatencyStats};
+use crate::writer::WriteMetrics;
 
 #[derive(Debug)]
 pub struct RunStats {
@@ -42,6 +43,9 @@ pub struct RunStats {
     responses_other: AtomicU64,
     network_errors: AtomicU64,
     request_latency: LatencyStats,
+    bytes_written: AtomicU64,
+    body_read_latency: LatencyStats,
+    file_write_latency: LatencyStats,
     error_client: AtomicU64,
     error_http: AtomicU64,
     error_network: AtomicU64,
@@ -67,6 +71,9 @@ pub struct RunStatsSnapshot {
     pub responses_other: u64,
     pub network_errors: u64,
     pub request_latency: Option<LatencySnapshot>,
+    pub bytes_written: u64,
+    pub body_read_latency: Option<LatencySnapshot>,
+    pub file_write_latency: Option<LatencySnapshot>,
     pub error_client: u64,
     pub error_http: u64,
     pub error_network: u64,
@@ -99,6 +106,9 @@ impl RunStats {
             responses_other: AtomicU64::new(0),
             network_errors: AtomicU64::new(0),
             request_latency: LatencyStats::new(),
+            bytes_written: AtomicU64::new(0),
+            body_read_latency: LatencyStats::new(),
+            file_write_latency: LatencyStats::new(),
             error_http: AtomicU64::new(0),
             error_network: AtomicU64::new(0),
             error_file: AtomicU64::new(0),
@@ -154,6 +164,14 @@ impl RunStats {
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.network_errors.fetch_add(1, Ordering::Relaxed);
         self.request_latency.record(latency);
+    }
+
+    /// Records finalized output independently of HTTP attempts and final hash outcomes.
+    pub fn record_write(&self, metrics: WriteMetrics) {
+        self.bytes_written
+            .fetch_add(metrics.bytes_written, Ordering::Relaxed);
+        self.body_read_latency.record(metrics.body_read);
+        self.file_write_latency.record(metrics.file_write);
     }
 
     /// Records processed, error-category, and cancellation counters for one
@@ -219,6 +237,9 @@ impl RunStats {
             responses_other: self.responses_other.load(Ordering::Relaxed),
             network_errors: self.network_errors.load(Ordering::Relaxed),
             request_latency: self.request_latency.snapshot(),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            body_read_latency: self.body_read_latency.snapshot(),
+            file_write_latency: self.file_write_latency.snapshot(),
             error_client,
             error_http,
             error_network,
@@ -274,6 +295,7 @@ impl RunStats {
                 "response=200:{ok} 304:{not_modified} 429:{too_many_requests} ",
                 "4xx:{client_error} 5xx:{server_error} other:{other} ",
                 "network_errors={network_errors} request_latency={request_latency} ",
+                "body_read={body_read} file_write={file_write} bytes_written={bytes_written} ",
                 "{retries} {errors}"
             ),
             status = status,
@@ -295,6 +317,9 @@ impl RunStats {
             other = s.responses_other,
             network_errors = s.network_errors,
             request_latency = format_latency(s.request_latency),
+            body_read = format_latency(s.body_read_latency),
+            file_write = format_latency(s.file_write_latency),
+            bytes_written = s.bytes_written,
             retries = retry_segment,
             errors = error_segment
         )
@@ -476,6 +501,72 @@ mod tests {
         assert_eq!(outcome.requests, 4);
         assert_eq!(outcome.total_retries, 3);
         assert_eq!(outcome.retried_requests, 1);
+    }
+
+    #[test]
+    fn finalized_writes_aggregate_independently_of_attempts_and_outcomes() {
+        let stats = RunStats::new(2);
+        for (bytes_written, read_ms, write_ms) in [(1_073_741_825, 2, 10), (7, 6, 30)] {
+            stats.record_write(WriteMetrics {
+                bytes_written,
+                body_read: Duration::from_millis(read_ms),
+                file_write: Duration::from_millis(write_ms),
+            });
+        }
+
+        let writes = stats.snapshot(false);
+        assert_eq!(writes.bytes_written, 1_073_741_832);
+        let body_read = writes.body_read_latency.unwrap();
+        assert_eq!(body_read.count, 2);
+        assert_eq!(body_read.min_ms, 2.0);
+        assert_eq!(body_read.average_ms, 4.0);
+        assert_eq!(body_read.max_ms, 6.0);
+        let file_write = writes.file_write_latency.unwrap();
+        assert_eq!(file_write.count, 2);
+        assert_eq!(file_write.min_ms, 10.0);
+        assert_eq!(file_write.average_ms, 20.0);
+        assert_eq!(file_write.max_ms, 30.0);
+        assert_eq!(writes.processed, 0);
+        assert_eq!(writes.downloaded_or_updated, 0);
+        assert_eq!(writes.not_modified, 0);
+        assert_eq!(writes.cancelled, 0);
+        assert_eq!(writes.requests, 0);
+        assert_eq!(writes.responses_ok, 0);
+        assert_eq!(writes.network_errors, 0);
+        assert_eq!(writes.request_latency, None);
+        assert_eq!(writes.errors_total, 0);
+        assert_eq!(writes.total_retries, 0);
+        assert_eq!(writes.retried_requests, 0);
+
+        stats.record_response(StatusCode::OK, Duration::from_millis(1));
+        stats.record_downloaded();
+        stats.record_retries(2);
+        stats.record_error(&DownloadError::Cancelled {
+            hash: "AAAAA".to_string(),
+        });
+        let outcome = stats.snapshot(false);
+        assert_eq!(outcome.bytes_written, writes.bytes_written);
+        assert_eq!(outcome.body_read_latency, writes.body_read_latency);
+        assert_eq!(outcome.file_write_latency, writes.file_write_latency);
+
+        let line = RunStats::summary_line(&outcome);
+        assert!(line.contains("body_read=min=2.000ms avg=4.000ms"));
+        assert!(line.contains("file_write=min=10.000ms avg=20.000ms"));
+        assert!(line.contains("bytes_written=1073741832 retries="));
+    }
+
+    #[test]
+    fn unchanged_outcomes_do_not_produce_io_samples() {
+        let stats = RunStats::new(1);
+        stats.record_response(StatusCode::NOT_MODIFIED, Duration::from_millis(1));
+        stats.record_not_modified();
+
+        let snapshot = stats.snapshot(false);
+        assert_eq!(snapshot.bytes_written, 0);
+        assert_eq!(snapshot.body_read_latency, None);
+        assert_eq!(snapshot.file_write_latency, None);
+        let line = RunStats::summary_line(&snapshot);
+        assert!(line.contains("body_read=none file_write=none bytes_written=0 retries="));
     }
 
     #[test]
