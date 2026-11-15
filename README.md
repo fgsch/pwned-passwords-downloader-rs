@@ -96,8 +96,9 @@ directory. This cache stores the ETag for each downloaded range so
 later runs can avoid starting over.
 
 With `--incremental` (the default), the tool uses this cache to
-skip unchanged ranges via `If-None-Match`. If a range’s file is
-missing, it is downloaded unconditionally. Use
+skip unchanged ranges via `If-None-Match`. A `200` response with an ETag
+equivalent to the one sent is also treated as unchanged, without rewriting
+the file. If a range’s file is missing, it is downloaded unconditionally. Use
 `--ignore-missing-hash-file` to always issue conditional requests,
 even when files are missing (useful if you copy `.etag_cache.json`
 to another machine and only want to fetch ranges that changed). Deleting

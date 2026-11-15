@@ -84,6 +84,29 @@ pub enum DownloadStatus {
     NotModified,
 }
 
+async fn write_response_if_modified(
+    hash: &str,
+    response: reqwest::Response,
+    etag: Option<&str>,
+    writer: &dyn HashWriter,
+) -> Result<DownloadStatus, WriteError> {
+    let response_etag = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|s| s.to_str().ok());
+
+    // If-None-Match uses weak comparison, even for redundant 200s.
+    if etag.zip(response_etag).is_some_and(|(sent, received)| {
+        sent.strip_prefix("W/").unwrap_or(sent) == received.strip_prefix("W/").unwrap_or(received)
+    }) {
+        return Ok(DownloadStatus::NotModified);
+    }
+
+    let etag = response_etag.map(String::from);
+    writer.write_response(hash, response).await?;
+    Ok(DownloadStatus::Downloaded { etag })
+}
+
 pub async fn download_hash(
     client: &reqwest::Client,
     args: &Args,
@@ -110,16 +133,10 @@ pub async fn download_hash(
                 let status_code = response.status();
                 match status_code {
                     StatusCode::OK => {
-                        let etag = response
-                            .headers()
-                            .get(header::ETAG)
-                            .and_then(|s| s.to_str().ok())
-                            .map(String::from);
-
-                        match writer.write_response(hash, response).await {
-                            Ok(_) => {
+                        match write_response_if_modified(hash, response, etag, writer).await {
+                            Ok(status) => {
                                 return Ok(DownloadOutcome {
-                                    status: DownloadStatus::Downloaded { etag },
+                                    status,
                                     retries_used: retry as u64,
                                 });
                             }
@@ -444,6 +461,158 @@ mod tests {
         .await;
         ignored_missing_mock.assert_async().await;
         assert_eq!(result.unwrap().status, DownloadStatus::NotModified);
+    }
+
+    #[tokio::test]
+    async fn download_hash_preserves_file_when_200_etag_is_unchanged() {
+        for (request_etag, response_etag) in [
+            ("\"same-etag\"", "\"same-etag\""),
+            ("W/\"same-etag\"", "\"same-etag\""),
+            ("\"same-etag\"", "W/\"same-etag\""),
+            ("W/\"same-etag\"", "W/\"same-etag\""),
+        ] {
+            let mut setup = TestSetup::new().await;
+            let writer = setup.writer();
+            let file_path = setup.temp_dir.path().join("AAAAA");
+            fs::write(&file_path, "existing content").await.unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file_path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))
+                .unwrap();
+            let original_modified = fs::metadata(&file_path).await.unwrap().modified().unwrap();
+
+            let mock = setup
+                .server
+                .mock("GET", "/range/AAAAA")
+                .match_header("if-none-match", request_etag)
+                .with_status(200)
+                .with_header("etag", response_etag)
+                .with_body("existing content")
+                .create_async()
+                .await;
+            let base_url = setup.base_url();
+            let result = download_hash(
+                &setup.client,
+                &setup.args,
+                &base_url,
+                "AAAAA",
+                Some(request_etag),
+                &writer,
+            )
+            .await;
+
+            mock.assert_async().await;
+            assert_eq!(
+                result.unwrap(),
+                DownloadOutcome {
+                    status: DownloadStatus::NotModified,
+                    retries_used: 0,
+                }
+            );
+            assert_eq!(
+                fs::metadata(&file_path).await.unwrap().modified().unwrap(),
+                original_modified
+            );
+            assert_eq!(
+                fs::read_to_string(&file_path).await.unwrap(),
+                "existing content"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn download_hash_writes_200_with_changed_or_missing_etag() {
+        for response_etag in [Some("\"new-etag\""), Some("\"SAME-ETAG\""), None] {
+            let mut setup = TestSetup::new().await;
+            let writer = setup.writer();
+            let file_path = setup.temp_dir.path().join("AAAAA");
+            fs::write(&file_path, "existing content").await.unwrap();
+
+            let mut mock = setup
+                .server
+                .mock("GET", "/range/AAAAA")
+                .match_header("if-none-match", "\"same-etag\"")
+                .with_status(200)
+                .with_body("updated content");
+            if let Some(etag) = response_etag {
+                mock = mock.with_header("etag", etag);
+            }
+            let mock = mock.create_async().await;
+            let base_url = setup.base_url();
+            let result = download_hash(
+                &setup.client,
+                &setup.args,
+                &base_url,
+                "AAAAA",
+                Some("\"same-etag\""),
+                &writer,
+            )
+            .await;
+
+            mock.assert_async().await;
+            assert_eq!(
+                result.unwrap(),
+                DownloadOutcome {
+                    status: DownloadStatus::Downloaded {
+                        etag: response_etag.map(String::from),
+                    },
+                    retries_used: 0,
+                }
+            );
+            assert_eq!(
+                fs::read_to_string(&file_path).await.unwrap(),
+                "updated content"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_downloads_missing_file_with_cached_etag() {
+        let mut setup = TestSetup::new().await;
+        setup.args.incremental = true;
+        let token = CancellationToken::new();
+        let mut writer = setup.writer();
+        writer.scan_existing_hashes(&token, None).await.unwrap();
+        let cached_etags = HashMap::from([("AAAAA".to_string(), "W/\"same-etag\"".to_string())]);
+        let mock = setup
+            .server
+            .mock("GET", "/range/AAAAA")
+            .match_header("if-none-match", Matcher::Missing)
+            .with_status(200)
+            .with_header("etag", "W/\"same-etag\"")
+            .with_body("downloaded missing file")
+            .create_async()
+            .await;
+        let base_url = setup.base_url();
+        let (_, result) = process_single_hash(
+            &setup.client,
+            &setup.args,
+            &base_url,
+            "AAAAA".to_string(),
+            &cached_etags,
+            &token,
+            &writer,
+        )
+        .await;
+
+        mock.assert_async().await;
+        assert_eq!(
+            result.unwrap(),
+            DownloadOutcome {
+                status: DownloadStatus::Downloaded {
+                    etag: Some("W/\"same-etag\"".to_string()),
+                },
+                retries_used: 0,
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(setup.temp_dir.path().join("AAAAA"))
+                .await
+                .unwrap(),
+            "downloaded missing file"
+        );
     }
 
     #[tokio::test]
