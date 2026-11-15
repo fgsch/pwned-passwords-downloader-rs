@@ -22,15 +22,26 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::download::DownloadError;
+use crate::metrics::{LatencySnapshot, LatencyStats};
 
 #[derive(Debug)]
 pub struct RunStats {
     started_at: Instant,
     total_targets: u64,
     processed: AtomicU64,
+    end_to_end_nanos: AtomicU64,
     downloaded_or_updated: AtomicU64,
     not_modified: AtomicU64,
     cancelled: AtomicU64,
+    requests: AtomicU64,
+    responses_ok: AtomicU64,
+    responses_not_modified: AtomicU64,
+    responses_too_many_requests: AtomicU64,
+    responses_other_client_error: AtomicU64,
+    responses_server_error: AtomicU64,
+    responses_other: AtomicU64,
+    network_errors: AtomicU64,
+    request_latency: LatencyStats,
     error_client: AtomicU64,
     error_http: AtomicU64,
     error_network: AtomicU64,
@@ -47,6 +58,15 @@ pub struct RunStatsSnapshot {
     pub downloaded_or_updated: u64,
     pub not_modified: u64,
     pub cancelled: u64,
+    pub requests: u64,
+    pub responses_ok: u64,
+    pub responses_not_modified: u64,
+    pub responses_too_many_requests: u64,
+    pub responses_other_client_error: u64,
+    pub responses_server_error: u64,
+    pub responses_other: u64,
+    pub network_errors: u64,
+    pub request_latency: Option<LatencySnapshot>,
     pub error_client: u64,
     pub error_http: u64,
     pub error_network: u64,
@@ -66,9 +86,19 @@ impl RunStats {
             total_targets,
             processed: AtomicU64::new(0),
             downloaded_or_updated: AtomicU64::new(0),
+            end_to_end_nanos: AtomicU64::new(0),
             not_modified: AtomicU64::new(0),
             cancelled: AtomicU64::new(0),
             error_client: AtomicU64::new(0),
+            requests: AtomicU64::new(0),
+            responses_ok: AtomicU64::new(0),
+            responses_not_modified: AtomicU64::new(0),
+            responses_too_many_requests: AtomicU64::new(0),
+            responses_other_client_error: AtomicU64::new(0),
+            responses_server_error: AtomicU64::new(0),
+            responses_other: AtomicU64::new(0),
+            network_errors: AtomicU64::new(0),
+            request_latency: LatencyStats::new(),
             error_http: AtomicU64::new(0),
             error_network: AtomicU64::new(0),
             error_file: AtomicU64::new(0),
@@ -99,6 +129,33 @@ impl RunStats {
         }
     }
 
+    pub fn record_end_to_end(&self, duration: Duration) {
+        let nanos = duration.as_nanos().min(u64::MAX as u128) as u64;
+        self.end_to_end_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// Records one completed HTTP attempt, independently of its final hash outcome.
+    pub fn record_response(&self, status: reqwest::StatusCode, latency: Duration) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.request_latency.record(latency);
+        let counter = match status {
+            reqwest::StatusCode::OK => &self.responses_ok,
+            reqwest::StatusCode::NOT_MODIFIED => &self.responses_not_modified,
+            reqwest::StatusCode::TOO_MANY_REQUESTS => &self.responses_too_many_requests,
+            status if status.is_client_error() => &self.responses_other_client_error,
+            status if status.is_server_error() => &self.responses_server_error,
+            _ => &self.responses_other,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a completed transport failure, not an unfinished cancelled attempt.
+    pub fn record_network_error(&self, latency: Duration) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.network_errors.fetch_add(1, Ordering::Relaxed);
+        self.request_latency.record(latency);
+    }
+
     /// Records processed, error-category, and cancellation counters for one
     /// download error. Retry counts are recorded separately with
     /// `record_retries`.
@@ -123,12 +180,18 @@ impl RunStats {
         }
     }
 
+    /// Returns a best-effort snapshot. Concurrent work may make fields reflect
+    /// slightly different points in time; snapshot after work stops for final totals.
     pub fn snapshot(&self, was_cancelled: bool) -> RunStatsSnapshot {
         let elapsed = self.started_at.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
         let processed = self.processed.load(Ordering::Relaxed);
         let avg_end_to_end_per_processed_secs = if processed > 0 {
-            Some(elapsed.as_secs_f64() / processed as f64)
+            Some(
+                self.end_to_end_nanos.load(Ordering::Relaxed) as f64
+                    / processed as f64
+                    / 1_000_000_000.0,
+            )
         } else {
             None
         };
@@ -147,6 +210,15 @@ impl RunStats {
             downloaded_or_updated: self.downloaded_or_updated.load(Ordering::Relaxed),
             not_modified: self.not_modified.load(Ordering::Relaxed),
             cancelled: self.cancelled.load(Ordering::Relaxed),
+            requests: self.requests.load(Ordering::Relaxed),
+            responses_ok: self.responses_ok.load(Ordering::Relaxed),
+            responses_not_modified: self.responses_not_modified.load(Ordering::Relaxed),
+            responses_too_many_requests: self.responses_too_many_requests.load(Ordering::Relaxed),
+            responses_other_client_error: self.responses_other_client_error.load(Ordering::Relaxed),
+            responses_server_error: self.responses_server_error.load(Ordering::Relaxed),
+            responses_other: self.responses_other.load(Ordering::Relaxed),
+            network_errors: self.network_errors.load(Ordering::Relaxed),
+            request_latency: self.request_latency.snapshot(),
             error_client,
             error_http,
             error_network,
@@ -198,7 +270,11 @@ impl RunStats {
                 "Run stats status={status} elapsed={elapsed:.2}s ",
                 "targets={targets} processed={processed} progress_pct={progress:.2} ",
                 "rate_hps={rate:.1} avg={avg_ms:.3}ms updated={updated} unchanged={unchanged} ",
-                "cancelled={cancelled} {retries} {errors}"
+                "cancelled={cancelled} requests={requests} ",
+                "response=200:{ok} 304:{not_modified} 429:{too_many_requests} ",
+                "4xx:{client_error} 5xx:{server_error} other:{other} ",
+                "network_errors={network_errors} request_latency={request_latency} ",
+                "{retries} {errors}"
             ),
             status = status,
             elapsed = elapsed_secs,
@@ -210,9 +286,42 @@ impl RunStats {
             updated = s.downloaded_or_updated,
             unchanged = s.not_modified,
             cancelled = s.cancelled,
+            requests = s.requests,
+            ok = s.responses_ok,
+            not_modified = s.responses_not_modified,
+            too_many_requests = s.responses_too_many_requests,
+            client_error = s.responses_other_client_error,
+            server_error = s.responses_server_error,
+            other = s.responses_other,
+            network_errors = s.network_errors,
+            request_latency = format_latency(s.request_latency),
             retries = retry_segment,
             errors = error_segment
         )
+    }
+}
+
+fn format_latency(latency: Option<LatencySnapshot>) -> String {
+    latency.map_or_else(
+        || "none".to_string(),
+        |latency| {
+            format!(
+                "min={:.3}ms avg={:.3}ms p50{} p95{} max={:.3}ms",
+                latency.min_ms,
+                latency.average_ms,
+                format_latency_bound(latency.p50_upper_bound_ms),
+                format_latency_bound(latency.p95_upper_bound_ms),
+                latency.max_ms
+            )
+        },
+    )
+}
+
+fn format_latency_bound(bound_ms: u64) -> String {
+    if bound_ms == u64::MAX {
+        ">500ms".to_string()
+    } else {
+        format!("<={bound_ms}ms")
     }
 }
 
@@ -226,6 +335,9 @@ mod tests {
     #[test]
     fn snapshot_counts_success_paths() {
         let stats = RunStats::new(42);
+        for duration_ms in [100, 200, 300, 400] {
+            stats.record_end_to_end(Duration::from_millis(duration_ms));
+        }
         stats.record_downloaded();
         stats.record_downloaded();
         stats.record_not_modified();
@@ -241,13 +353,7 @@ mod tests {
         assert_eq!(snapshot.downloaded_or_updated, 2);
         assert_eq!(snapshot.total_retries, 2);
         assert_eq!(snapshot.retried_requests, 1);
-        assert!(snapshot.avg_end_to_end_per_processed_secs.is_some());
-        assert!(
-            snapshot
-                .avg_end_to_end_per_processed_secs
-                .unwrap()
-                .is_sign_positive()
-        );
+        assert_eq!(snapshot.avg_end_to_end_per_processed_secs, Some(0.25));
         assert_eq!(snapshot.not_modified, 1);
         assert_eq!(snapshot.cancelled, 1);
         assert_eq!(snapshot.errors_total, 0);
@@ -334,5 +440,108 @@ mod tests {
         assert!(line.contains("status=cancelled"));
         assert!(line.contains("retries=2 (requests=1)"));
         assert!(line.contains("errors=1 (client=0 http=1 network=0 file=0)"));
+    }
+
+    #[test]
+    fn completed_attempts_do_not_count_as_final_outcomes() {
+        let stats = RunStats::new(1);
+        let latency = Duration::from_millis(10);
+        for status in [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::OK,
+        ] {
+            stats.record_response(status, latency);
+        }
+        stats.record_network_error(latency);
+
+        let attempts = stats.snapshot(false);
+        assert_eq!(attempts.requests, 4);
+        assert_eq!(attempts.responses_too_many_requests, 1);
+        assert_eq!(attempts.responses_server_error, 1);
+        assert_eq!(attempts.responses_ok, 1);
+        assert_eq!(attempts.network_errors, 1);
+        assert_eq!(attempts.request_latency.unwrap().count, 4);
+        assert_eq!(attempts.processed, 0);
+        assert_eq!(attempts.errors_total, 0);
+        assert_eq!(attempts.total_retries, 0);
+
+        stats.record_downloaded();
+        stats.record_retries(3);
+        let outcome = stats.snapshot(false);
+        assert_eq!(outcome.processed, 1);
+        assert_eq!(outcome.downloaded_or_updated, 1);
+        assert_eq!(outcome.errors_total, 0);
+        assert_eq!(outcome.error_network, 0);
+        assert_eq!(outcome.requests, 4);
+        assert_eq!(outcome.total_retries, 3);
+        assert_eq!(outcome.retried_requests, 1);
+    }
+
+    #[test]
+    fn responses_are_partitioned_by_raw_status() {
+        let stats = RunStats::new(1);
+        for status in [
+            StatusCode::OK,
+            StatusCode::NOT_MODIFIED,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::CREATED,
+            StatusCode::FOUND,
+        ] {
+            stats.record_response(status, Duration::from_millis(2));
+        }
+
+        let snapshot = stats.snapshot(false);
+        assert_eq!(snapshot.requests, 8);
+        assert_eq!(snapshot.responses_ok, 1);
+        assert_eq!(snapshot.responses_not_modified, 1);
+        assert_eq!(snapshot.responses_too_many_requests, 1);
+        assert_eq!(snapshot.responses_other_client_error, 2);
+        assert_eq!(snapshot.responses_server_error, 1);
+        assert_eq!(snapshot.responses_other, 2);
+        assert_eq!(snapshot.network_errors, 0);
+        let line = RunStats::summary_line(&snapshot);
+        assert!(line.contains("requests=8"));
+        assert!(line.contains("response=200:1 304:1 429:1 4xx:2 5xx:1 other:2"));
+    }
+
+    #[test]
+    fn average_uses_measured_operations_instead_of_elapsed_wall_time() {
+        let stats = RunStats::new(2);
+        stats.record_end_to_end(Duration::from_millis(125));
+        stats.record_downloaded();
+        stats.record_end_to_end(Duration::from_millis(375));
+        stats.record_not_modified();
+        let snapshot = stats.snapshot(false);
+
+        assert_eq!(snapshot.avg_end_to_end_per_processed_secs, Some(0.25));
+        assert!(RunStats::summary_line(&snapshot).contains("avg=250.000ms"));
+    }
+
+    #[test]
+    fn request_latency_summary_labels_units_and_overflow_truthfully() {
+        let stats = RunStats::new(0);
+        assert!(RunStats::summary_line(&stats.snapshot(false)).contains("request_latency=none"));
+        stats.record_network_error(Duration::from_micros(500_001));
+        let line = RunStats::summary_line(&stats.snapshot(false));
+
+        assert!(line.contains("network_errors=1"));
+        assert!(line.contains("request_latency=min=500.001ms avg=500.001ms"));
+        assert!(line.contains("p50>500ms p95>500ms max=500.001ms"));
+        assert!(!line.contains("p50<=500"));
+        assert!(!line.contains("p95<=500"));
+    }
+
+    #[test]
+    fn request_latency_summary_reports_finite_percentile_upper_bounds() {
+        let stats = RunStats::new(0);
+        stats.record_response(StatusCode::OK, Duration::from_micros(1_500));
+        let line = RunStats::summary_line(&stats.snapshot(false));
+
+        assert!(line.contains("min=1.500ms avg=1.500ms"));
+        assert!(line.contains("p50<=5ms p95<=5ms max=1.500ms"));
     }
 }

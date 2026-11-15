@@ -19,12 +19,17 @@
 // SOFTWARE.
 
 use reqwest::{StatusCode, header};
-use std::{collections::HashMap, error::Error as _, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error as _,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{Args, HashMode};
+use crate::stats::RunStats;
 use crate::writer::{HashWriter, WriteError};
 
 // Maximum number of seconds we will sleep on retry.
@@ -107,134 +112,155 @@ async fn write_response_if_modified(
     Ok(DownloadStatus::Downloaded { etag })
 }
 
-pub async fn download_hash(
-    client: &reqwest::Client,
-    args: &Args,
-    base_url: &str,
-    hash: &str,
-    etag: Option<&str>,
-    writer: &dyn HashWriter,
-) -> Result<DownloadOutcome, DownloadError> {
-    let url = format!("{base_url}{hash}");
+pub(crate) struct DownloadContext<'a> {
+    pub client: &'a reqwest::Client,
+    pub args: &'a Args,
+    pub base_url: &'a str,
+    pub writer: &'a dyn HashWriter,
+    pub stats: &'a RunStats,
+}
 
-    for retry in 0..=args.max_retries {
-        let mut request = client.get(url.as_str());
-
-        if matches!(args.hash_mode, HashMode::Ntlm) {
+impl DownloadContext<'_> {
+    async fn send_request(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+    ) -> reqwest::Result<reqwest::Response> {
+        let mut request = self.client.get(url);
+        if matches!(self.args.hash_mode, HashMode::Ntlm) {
             request = request.query(&[("mode", "ntlm")]);
         }
-
         if let Some(etag) = etag {
             request = request.header(header::IF_NONE_MATCH, etag);
         }
 
-        match request.send().await {
-            Ok(response) => {
-                let status_code = response.status();
-                match status_code {
-                    StatusCode::OK => {
-                        match write_response_if_modified(hash, response, etag, writer).await {
-                            Ok(status) => {
-                                return Ok(DownloadOutcome {
-                                    status,
-                                    retries_used: retry as u64,
-                                });
-                            }
-                            Err(err) => {
-                                if retry == args.max_retries || !err.is_retriable() {
-                                    return Err(DownloadError::FileOperation {
-                                        retries: retry,
-                                        source: err,
+        let started_at = Instant::now();
+        let result = request.send().await;
+        let elapsed = started_at.elapsed();
+        match &result {
+            Ok(response) => self.stats.record_response(response.status(), elapsed),
+            Err(_) => self.stats.record_network_error(elapsed),
+        }
+        result
+    }
+
+    async fn download_hash(
+        &self,
+        hash: &str,
+        etag: Option<&str>,
+    ) -> Result<DownloadOutcome, DownloadError> {
+        let url = format!("{}{hash}", self.base_url);
+
+        for retry in 0..=self.args.max_retries {
+            match self.send_request(&url, etag).await {
+                Ok(response) => {
+                    let status_code = response.status();
+                    match status_code {
+                        StatusCode::OK => {
+                            match write_response_if_modified(hash, response, etag, self.writer)
+                                .await
+                            {
+                                Ok(status) => {
+                                    return Ok(DownloadOutcome {
+                                        status,
+                                        retries_used: retry as u64,
                                     });
+                                }
+                                Err(err) => {
+                                    if retry == self.args.max_retries || !err.is_retriable() {
+                                        return Err(DownloadError::FileOperation {
+                                            retries: retry,
+                                            source: err,
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
-                    StatusCode::NOT_MODIFIED if etag.is_some() => {
-                        return Ok(DownloadOutcome {
-                            status: DownloadStatus::NotModified,
-                            retries_used: retry as u64,
-                        });
-                    }
-                    StatusCode::NOT_MODIFIED => {
-                        return Err(DownloadError::Http {
-                            hash: hash.to_string(),
-                            status_code,
-                            retries: retry,
-                        });
-                    }
-                    status_code
-                        if status_code.is_client_error()
-                            && status_code != StatusCode::TOO_MANY_REQUESTS =>
-                    {
-                        return Err(DownloadError::Client {
-                            hash: hash.to_string(),
-                            status_code,
-                            retries: retry,
-                        });
-                    }
-                    status_code => {
-                        // We intentionally ignore any Retry-After on 429s and
-                        // keep using the jittered exponential backoff below.
-                        if retry == args.max_retries {
+                        StatusCode::NOT_MODIFIED if etag.is_some() => {
+                            return Ok(DownloadOutcome {
+                                status: DownloadStatus::NotModified,
+                                retries_used: retry as u64,
+                            });
+                        }
+                        StatusCode::NOT_MODIFIED => {
                             return Err(DownloadError::Http {
                                 hash: hash.to_string(),
                                 status_code,
                                 retries: retry,
                             });
                         }
+                        status_code
+                            if status_code.is_client_error()
+                                && status_code != StatusCode::TOO_MANY_REQUESTS =>
+                        {
+                            return Err(DownloadError::Client {
+                                hash: hash.to_string(),
+                                status_code,
+                                retries: retry,
+                            });
+                        }
+                        status_code => {
+                            // We intentionally ignore any Retry-After on 429s and
+                            // keep using the jittered exponential backoff below.
+                            if retry == self.args.max_retries {
+                                return Err(DownloadError::Http {
+                                    hash: hash.to_string(),
+                                    status_code,
+                                    retries: retry,
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    if retry == self.args.max_retries {
+                        return Err(DownloadError::Network {
+                            hash: hash.to_string(),
+                            error: err
+                                .source()
+                                .map_or_else(|| err.to_string(), |e| e.to_string()),
+                            retries: retry,
+                        });
                     }
                 }
             }
-            Err(err) => {
-                if retry == args.max_retries {
-                    return Err(DownloadError::Network {
-                        hash: hash.to_string(),
-                        error: err
-                            .source()
-                            .map_or_else(|| err.to_string(), |e| e.to_string()),
-                        retries: retry,
-                    });
-                }
+
+            if retry < self.args.max_retries {
+                let delay = 2u64.saturating_pow(retry as u32).min(MAX_BACKOFF_SECS);
+                let jitter = rand::random_range(delay / 2..=delay).max(1);
+                sleep(Duration::from_secs(jitter)).await;
             }
         }
 
-        if retry < args.max_retries {
-            let delay = 2u64.saturating_pow(retry as u32).min(MAX_BACKOFF_SECS);
-            let jitter = rand::random_range(delay / 2..=delay).max(1);
-            sleep(Duration::from_secs(jitter)).await;
-        }
+        unreachable!()
     }
 
-    unreachable!()
-}
-
-pub async fn process_single_hash(
-    client: &reqwest::Client,
-    args: &Args,
-    base_url: &str,
-    hash: String,
-    cached_etags: &HashMap<String, String>,
-    token: &CancellationToken,
-    writer: &dyn HashWriter,
-) -> (String, Result<DownloadOutcome, DownloadError>) {
-    let etag = if args.incremental {
-        if let Some(etag) = cached_etags.get(&hash)
-            && (args.ignore_missing_hash_file || writer.hash_exists(&hash).await)
-        {
-            Some(etag.as_str())
+    pub async fn process_single_hash(
+        &self,
+        hash: String,
+        cached_etags: &HashMap<String, String>,
+        token: &CancellationToken,
+    ) -> (String, Result<DownloadOutcome, DownloadError>) {
+        let started_at = Instant::now();
+        let etag = if self.args.incremental {
+            if let Some(etag) = cached_etags.get(&hash)
+                && (self.args.ignore_missing_hash_file || self.writer.hash_exists(&hash).await)
+            {
+                Some(etag.as_str())
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
-    let result = tokio::select! {
-        biased;
-        _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
-        res = download_hash(client, args, base_url, &hash, etag, writer) => res,
-    };
-    (hash, result)
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(DownloadError::Cancelled { hash: hash.clone() }),
+            res = self.download_hash(&hash, etag) => res,
+        };
+        self.stats.record_end_to_end(started_at.elapsed());
+        (hash, result)
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +335,7 @@ mod tests {
         temp_dir: TempDir,
         args: Args,
         client: reqwest::Client,
+        stats: RunStats,
     }
 
     impl TestSetup {
@@ -316,12 +343,13 @@ mod tests {
             let server = Server::new_async().await;
             let temp_dir = TempDir::new().unwrap();
             let args = create_test_args(temp_dir.path().to_path_buf());
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
             Self {
                 server,
                 temp_dir,
                 args,
                 client,
+                stats: RunStats::new(1),
             }
         }
 
@@ -331,6 +359,20 @@ mod tests {
 
         fn writer(&self) -> HashFileWriter {
             create_test_writer(&self.args)
+        }
+
+        fn context<'a>(
+            &'a self,
+            base_url: &'a str,
+            writer: &'a dyn HashWriter,
+        ) -> DownloadContext<'a> {
+            DownloadContext {
+                client: &self.client,
+                args: &self.args,
+                base_url,
+                writer,
+                stats: &self.stats,
+            }
         }
     }
 
@@ -353,16 +395,14 @@ mod tests {
         let base_url = setup.base_url();
         let cached_etags = HashMap::new();
 
-        let (hash, result) = process_single_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "AAAAA".to_string(),
-            &cached_etags,
-            &CancellationToken::new(),
-            &writer,
-        )
-        .await;
+        let (hash, result) = setup
+            .context(&base_url, &writer)
+            .process_single_hash(
+                "AAAAA".to_string(),
+                &cached_etags,
+                &CancellationToken::new(),
+            )
+            .await;
 
         mock.assert_async().await;
         assert_eq!(hash, "AAAAA");
@@ -400,16 +440,10 @@ mod tests {
             .create_async()
             .await;
         let base_url = setup.base_url();
-        let (_, result) = process_single_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "AAAAA".to_string(),
-            &cached_etags,
-            &token,
-            &writer,
-        )
-        .await;
+        let (_, result) = setup
+            .context(&base_url, &writer)
+            .process_single_hash("AAAAA".to_string(), &cached_etags, &token)
+            .await;
         existing_mock.assert_async().await;
         assert_eq!(result.unwrap().status, DownloadStatus::NotModified);
 
@@ -420,16 +454,10 @@ mod tests {
             .with_status(304)
             .create_async()
             .await;
-        let (_, result) = process_single_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "BBBBB".to_string(),
-            &cached_etags,
-            &token,
-            &writer,
-        )
-        .await;
+        let (_, result) = setup
+            .context(&base_url, &writer)
+            .process_single_hash("BBBBB".to_string(), &cached_etags, &token)
+            .await;
         missing_mock.assert_async().await;
         assert!(matches!(
             result,
@@ -449,16 +477,10 @@ mod tests {
             .with_status(304)
             .create_async()
             .await;
-        let (_, result) = process_single_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "CCCCC".to_string(),
-            &cached_etags,
-            &token,
-            &ignored_missing_writer,
-        )
-        .await;
+        let (_, result) = setup
+            .context(&base_url, &ignored_missing_writer)
+            .process_single_hash("CCCCC".to_string(), &cached_etags, &token)
+            .await;
         ignored_missing_mock.assert_async().await;
         assert_eq!(result.unwrap().status, DownloadStatus::NotModified);
     }
@@ -493,17 +515,17 @@ mod tests {
                 .create_async()
                 .await;
             let base_url = setup.base_url();
-            let result = download_hash(
-                &setup.client,
-                &setup.args,
-                &base_url,
-                "AAAAA",
-                Some(request_etag),
-                &writer,
-            )
-            .await;
+            let result = setup
+                .context(&base_url, &writer)
+                .download_hash("AAAAA", Some(request_etag))
+                .await;
 
             mock.assert_async().await;
+            let snapshot = setup.stats.snapshot(false);
+            assert_eq!(snapshot.requests, 1);
+            assert_eq!(snapshot.responses_ok, 1);
+            assert_eq!(snapshot.responses_not_modified, 0);
+            assert_eq!(snapshot.request_latency.unwrap().count, 1);
             assert_eq!(
                 result.unwrap(),
                 DownloadOutcome {
@@ -541,15 +563,10 @@ mod tests {
             }
             let mock = mock.create_async().await;
             let base_url = setup.base_url();
-            let result = download_hash(
-                &setup.client,
-                &setup.args,
-                &base_url,
-                "AAAAA",
-                Some("\"same-etag\""),
-                &writer,
-            )
-            .await;
+            let result = setup
+                .context(&base_url, &writer)
+                .download_hash("AAAAA", Some("\"same-etag\""))
+                .await;
 
             mock.assert_async().await;
             assert_eq!(
@@ -586,16 +603,12 @@ mod tests {
             .create_async()
             .await;
         let base_url = setup.base_url();
-        let (_, result) = process_single_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "AAAAA".to_string(),
-            &cached_etags,
-            &token,
-            &writer,
-        )
-        .await;
+        let started_at = Instant::now();
+        let (_, result) = setup
+            .context(&base_url, &writer)
+            .process_single_hash("AAAAA".to_string(), &cached_etags, &token)
+            .await;
+        let elapsed = started_at.elapsed();
 
         mock.assert_async().await;
         assert_eq!(
@@ -613,6 +626,18 @@ mod tests {
                 .unwrap(),
             "downloaded missing file"
         );
+        // Final-result accounting belongs to the caller, not the operation.
+        assert_eq!(setup.stats.snapshot(false).processed, 0);
+        setup.stats.record_downloaded();
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_ok, 1);
+        assert_eq!(snapshot.total_retries, 0);
+        let latency = snapshot.request_latency.unwrap();
+        assert_eq!(latency.count, 1);
+        let average = snapshot.avg_end_to_end_per_processed_secs.unwrap();
+        assert!(average * 1_000.0 >= latency.max_ms);
+        assert!(average <= elapsed.as_secs_f64());
     }
 
     #[tokio::test]
@@ -631,15 +656,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "AAAAA",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("AAAAA", None)
+            .await;
 
         mock.assert_async().await;
 
@@ -678,15 +698,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "HHHHH",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("HHHHH", None)
+            .await;
 
         mock.assert_async().await;
 
@@ -717,17 +732,17 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "BBBBB",
-            Some("\"existing-etag\""),
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("BBBBB", Some("\"existing-etag\""))
+            .await;
 
         mock.assert_async().await;
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_ok, 0);
+        assert_eq!(snapshot.responses_not_modified, 1);
+        assert_eq!(snapshot.request_latency.unwrap().count, 1);
 
         assert!(result.is_ok());
         let outcome = result.unwrap();
@@ -755,18 +770,17 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let err = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "CCCCC",
-            None,
-            &writer,
-        )
-        .await
-        .unwrap_err();
+        let err = setup
+            .context(&base_url, &writer)
+            .download_hash("CCCCC", None)
+            .await
+            .unwrap_err();
 
         mock.assert_async().await;
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_not_modified, 1);
+        assert_eq!(snapshot.request_latency.unwrap().count, 1);
 
         assert!(matches!(
             err,
@@ -794,15 +808,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "GGGGG",
-            Some("\"cached-etag\""),
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("GGGGG", Some("\"cached-etag\""))
+            .await;
 
         mock.assert_async().await;
 
@@ -830,17 +839,16 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "CCCCC",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("CCCCC", None)
+            .await;
 
         mock.assert_async().await;
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_other_client_error, 1);
+        assert_eq!(snapshot.request_latency.unwrap().count, 1);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -880,17 +888,17 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let err = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "JJJJJ",
-            None,
-            &writer,
-        )
-        .await
-        .unwrap_err();
+        let err = setup
+            .context(&base_url, &writer)
+            .download_hash("JJJJJ", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, DownloadError::Client { retries: 1, .. }));
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 2);
+        assert_eq!(snapshot.responses_server_error, 1);
+        assert_eq!(snapshot.responses_other_client_error, 1);
+        assert_eq!(snapshot.request_latency.unwrap().count, 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -908,17 +916,16 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "DDDDD",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("DDDDD", None)
+            .await;
 
         mock.assert_async().await;
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 6);
+        assert_eq!(snapshot.responses_server_error, 6);
+        assert_eq!(snapshot.request_latency.unwrap().count, 6);
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -951,16 +958,11 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let err = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "KKKKK",
-            None,
-            &writer,
-        )
-        .await
-        .unwrap_err();
+        let err = setup
+            .context(&base_url, &writer)
+            .download_hash("KKKKK", None)
+            .await
+            .unwrap_err();
 
         mock.assert_async().await;
         assert!(matches!(err, DownloadError::Http { retries: 0, .. }));
@@ -984,16 +986,11 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let err = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "LLLLL",
-            None,
-            &writer,
-        )
-        .await
-        .unwrap_err();
+        let err = setup
+            .context(&base_url, &writer)
+            .download_hash("LLLLL", None)
+            .await
+            .unwrap_err();
 
         mock.assert_async().await;
         assert!(matches!(
@@ -1026,15 +1023,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "IIIII",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("IIIII", None)
+            .await;
         let outcome = result.unwrap();
 
         assert_eq!(outcome.retries_used, 1);
@@ -1044,6 +1036,127 @@ mod tests {
                 etag: Some("\"ok-etag\"".to_string())
             }
         );
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 2);
+        assert_eq!(snapshot.responses_ok, 1);
+        assert_eq!(snapshot.responses_server_error, 1);
+        assert_eq!(snapshot.request_latency.unwrap().count, 2);
+        assert_eq!(snapshot.processed, 0);
+        assert_eq!(snapshot.total_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_records_transport_failure_without_final_accounting() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut setup = TestSetup::new().await;
+        setup.args.max_retries = 0;
+        let writer = setup.writer();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base_url = format!("http://{}/range/", listener.local_addr().unwrap());
+        let context = setup.context(&base_url, &writer);
+        let cached_etags = HashMap::new();
+        let token = CancellationToken::new();
+        let ((_, result), ()) = tokio::join!(
+            context.process_single_hash("AAAAA".to_string(), &cached_etags, &token),
+            async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                stream.read_exact(&mut [0; 1]).await.unwrap();
+                stream
+                    .write_all(b"invalid HTTP response\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        );
+
+        assert!(matches!(
+            result,
+            Err(DownloadError::Network { retries: 0, .. })
+        ));
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.network_errors, 1);
+        assert_eq!(snapshot.responses_ok, 0);
+        assert_eq!(snapshot.request_latency.unwrap().count, 1);
+        assert_eq!(snapshot.processed, 0);
+        assert_eq!(snapshot.errors_total, 0);
+        assert_eq!(snapshot.total_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_does_not_count_cancelled_unfinished_request() {
+        use tokio::io::AsyncReadExt as _;
+
+        let setup = TestSetup::new().await;
+        let writer = setup.writer();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base_url = format!("http://{}/range/", listener.local_addr().unwrap());
+        let context = setup.context(&base_url, &writer);
+        let token = CancellationToken::new();
+        let cached_etags = HashMap::new();
+        let ((hash, result), ()) = tokio::join!(
+            context.process_single_hash("AAAAA".to_string(), &cached_etags, &token),
+            async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                stream.read_exact(&mut [0; 1]).await.unwrap();
+                token.cancel();
+            }
+        );
+
+        assert_eq!(hash, "AAAAA");
+        assert!(matches!(result, Err(DownloadError::Cancelled { .. })));
+        let snapshot = setup.stats.snapshot(false);
+        assert_eq!(snapshot.requests, 0);
+        assert_eq!(snapshot.network_errors, 0);
+        assert!(snapshot.request_latency.is_none());
+        assert_eq!(snapshot.processed, 0);
+        assert_eq!(snapshot.cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn process_single_hash_records_raw_unexpected_http_status() {
+        for status in [429_u16, 201] {
+            let mut setup = TestSetup::new().await;
+            setup.args.max_retries = 0;
+            let writer = setup.writer();
+            let mock = setup
+                .server
+                .mock("GET", "/range/AAAAA")
+                .with_status(usize::from(status))
+                .expect(1)
+                .create_async()
+                .await;
+            let base_url = setup.base_url();
+
+            let (_, result) = setup
+                .context(&base_url, &writer)
+                .process_single_hash(
+                    "AAAAA".to_string(),
+                    &HashMap::new(),
+                    &CancellationToken::new(),
+                )
+                .await;
+
+            mock.assert_async().await;
+            assert!(matches!(
+                result,
+                Err(DownloadError::Http { status_code, retries: 0, .. })
+                    if status_code.as_u16() == status
+            ));
+            let snapshot = setup.stats.snapshot(false);
+            assert_eq!(snapshot.requests, 1);
+            assert_eq!(
+                snapshot.responses_too_many_requests,
+                u64::from(status == 429)
+            );
+            assert_eq!(snapshot.responses_other, u64::from(status == 201));
+            assert_eq!(snapshot.request_latency.unwrap().count, 1);
+            assert_eq!(snapshot.errors_total, 0);
+        }
     }
 
     #[tokio::test]
@@ -1063,15 +1176,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "EEEEE",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("EEEEE", None)
+            .await;
 
         mock.assert_async().await;
 
@@ -1099,15 +1207,10 @@ mod tests {
             .await;
         let base_url = setup.base_url();
 
-        let result = download_hash(
-            &setup.client,
-            &setup.args,
-            &base_url,
-            "MMMMM",
-            None,
-            &writer,
-        )
-        .await;
+        let result = setup
+            .context(&base_url, &writer)
+            .download_hash("MMMMM", None)
+            .await;
 
         mock.assert_async().await;
 

@@ -21,6 +21,7 @@
 mod args;
 mod download;
 mod etag;
+mod metrics;
 mod stats;
 mod writer;
 
@@ -38,7 +39,7 @@ use tracing_subscriber::{
 };
 
 use args::{Args, parse_args};
-use download::{DownloadError, DownloadStatus, process_single_hash};
+use download::{DownloadContext, DownloadError, DownloadStatus};
 use etag::{ETagCache, ETagDeltas};
 use stats::RunStats;
 use writer::{HashFileWriter, HashWriter, ScanOutcome, ScanProgressObserver};
@@ -227,12 +228,20 @@ async fn process_hashes(input: ProcessInput<'_>) -> (ETagDeltas, bool) {
     let mut etag_deltas = ETagDeltas::default();
     let mut had_errors = false;
 
+    let download = DownloadContext {
+        client,
+        args,
+        base_url,
+        writer,
+        stats: stats.as_ref(),
+    };
+
     let stream = futures::stream::iter(hashes)
         .take_until(token.cancelled())
         .map(|hash| {
             let hash = format!("{hash:05X}");
 
-            process_single_hash(client, args, base_url, hash, cached_etags, token, writer)
+            download.process_single_hash(hash, cached_etags, token)
         })
         .buffer_unordered(args.max_concurrent_requests);
     tokio::pin!(stream);
@@ -329,6 +338,85 @@ mod tests {
         assert!(had_errors);
         assert!(deltas.updates.is_empty());
         assert!(deltas.removals.is_empty());
-        assert_eq!(stats.snapshot(false).errors_total, 1);
+        let snapshot = stats.snapshot(false);
+        assert_eq!(snapshot.errors_total, 1);
+        assert_eq!(snapshot.processed, 1);
+        assert_eq!(snapshot.requests, 1);
+        assert_eq!(snapshot.responses_server_error, 1);
+        assert_eq!(snapshot.network_errors, 0);
+        assert_eq!(snapshot.request_latency.unwrap().count, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_hashes_counts_retry_responses_separately_from_unchanged_hashes() {
+        let mut server = Server::new_async().await;
+        let retry_mock = server
+            .mock("GET", "/range/00000")
+            .match_header("if-none-match", "W/\"same-etag\"")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let unchanged_mock = server
+            .mock("GET", "/range/00000")
+            .match_header("if-none-match", "W/\"same-etag\"")
+            .with_status(200)
+            .with_header("etag", "\"same-etag\"")
+            .with_body("existing content")
+            .expect(1)
+            .create_async()
+            .await;
+        let temp_dir = TempDir::new().unwrap();
+        tokio::fs::write(temp_dir.path().join("00000"), "existing content")
+            .await
+            .unwrap();
+        let mut args = create_test_args(temp_dir.path().to_path_buf());
+        args.incremental = true;
+        args.max_retries = 1;
+        let token = CancellationToken::new();
+        let mut writer = create_test_writer(&args);
+        writer.scan_existing_hashes(&token, None).await.unwrap();
+        let client = reqwest::Client::new();
+        let cached_etags = HashMap::from([("00000".to_string(), "W/\"same-etag\"".to_string())]);
+        let stats = Arc::new(RunStats::new(1));
+        let span = tracing::info_span!("test");
+        let base_url = format!("{}/range/", server.url());
+
+        let (deltas, had_errors) = process_hashes(ProcessInput {
+            span: &span,
+            client: &client,
+            args: &args,
+            writer: &writer,
+            token: &token,
+            cached_etags: &cached_etags,
+            stats: stats.clone(),
+            base_url: &base_url,
+            hashes: 0..=0,
+        })
+        .await;
+
+        retry_mock.assert_async().await;
+        unchanged_mock.assert_async().await;
+        assert!(!had_errors);
+        assert!(deltas.updates.is_empty());
+        assert!(deltas.removals.is_empty());
+        let snapshot = stats.snapshot(false);
+        assert_eq!(snapshot.processed, 1);
+        assert_eq!(snapshot.downloaded_or_updated, 0);
+        assert_eq!(snapshot.not_modified, 1);
+        assert_eq!(snapshot.requests, 2);
+        assert_eq!(snapshot.responses_ok, 1);
+        assert_eq!(snapshot.responses_server_error, 1);
+        assert_eq!(snapshot.responses_not_modified, 0);
+        assert_eq!(snapshot.network_errors, 0);
+        assert_eq!(snapshot.errors_total, 0);
+        assert_eq!(snapshot.total_retries, 1);
+        assert_eq!(snapshot.retried_requests, 1);
+        let request_latency = snapshot.request_latency.unwrap();
+        assert_eq!(request_latency.count, 2);
+        assert!(
+            snapshot.avg_end_to_end_per_processed_secs.unwrap() * 1_000.0
+                >= request_latency.average_ms
+        );
     }
 }

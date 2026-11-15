@@ -17,7 +17,8 @@ and multiple compression formats.
 - **Compression support**: Save storage space with Brotli, Gzip, or no compression
 - **Hash mode support**: Download SHA-1 (default) or NTLM hash ranges
 - **Progress tracking**: Visual progress bar with ETA
-- **Run statistics**: Final summary of processed/downloaded/unchanged/cancelled/error/retry counts and average end-to-end time per processed hash
+- **Run statistics**: Final hash outcomes, HTTP response counts, network errors,
+  request latency summaries, throughput, and measured average duration per hash
 - **Retry mechanism**: Configurable retry attempts for failed requests
 
 ## Installation
@@ -106,6 +107,24 @@ the cache or using `--incremental false` forces a full re-download.
 
 Because the cache tracks the last-seen ETags, incremental mode also
 fetches any ranges that have changed since the previous run.
+
+### Run statistics
+
+The final summary separates hash outcomes from HTTP attempts. `requests` counts
+completed attempts, including retries and transport errors; an attempt cancelled
+before either result is not counted. `network_errors` includes retried failures,
+whereas `errors` counts hashes that ultimately failed.
+
+The `response` counts reflect the actual HTTP status. A `200` response whose ETag
+matches the conditional request therefore counts as HTTP `200` and an unchanged
+hash, not an updated file.
+
+`request_latency` measures time until response headers or a transport error,
+with minimum, average, approximate p50/p95 bounds, and maximum in milliseconds.
+`avg` is the measured average end-to-end duration per processed hash, including
+retry waits and file writing, also in milliseconds. `rate_hps` is processed hashes
+divided by the statistics' elapsed time; it is not the reciprocal of `avg` when
+downloads run concurrently.
 
 ## License
 
