@@ -367,16 +367,18 @@ mod tests {
         assert_eq!(content, "new content");
     }
 
+    #[test]
+    fn hash_from_file_name_rejects_empty_suffix() {
+        assert_eq!(hash_from_file_name("ABCDF.", ""), None);
+    }
+
     #[tokio::test]
     async fn scan_existing_hashes_recognizes_uncompressed_files() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(temp_dir.path().join("ABCDE"), "existing")
             .await
             .unwrap();
-        fs::write(temp_dir.path().join("ABCDE.gz"), "wrong extension")
-            .await
-            .unwrap();
-        fs::write(temp_dir.path().join("ABCDF."), "empty suffix")
+        fs::write(temp_dir.path().join("ABCDF.gz"), "wrong extension")
             .await
             .unwrap();
 
