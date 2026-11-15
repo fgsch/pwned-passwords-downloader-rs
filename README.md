@@ -82,7 +82,7 @@ Options:
       --request-timeout <REQUEST_TIMEOUT>
           Request timeout in seconds [default: 30]
   -u, --user-agent <USER_AGENT>
-          User-Agent string for HTTP requests [default: hibp-downloader/0.9]
+          User-Agent string for HTTP requests [default: hibp-downloader/0.10]
   -h, --help
           Print help (see more with '--help')
   -V, --version
